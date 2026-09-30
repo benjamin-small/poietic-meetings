@@ -23,6 +23,16 @@ let signaling;
 let call;
 let localStream;
 let ended = false;
+let me = null; // { id, token } from the server's welcome; used to resume after a drop
+let joinedAt = 0;
+let reconnecting = false;
+let lastDrop = null; // details of the latest drop, resent on reconnect in case the first report was lost
+
+/** Tell the server something went wrong, for Workers Logs. Best effort. */
+function report(event, fields = {}) {
+  const body = JSON.stringify({ event, room: roomId, peer: me?.id, peers: names.size, ...fields });
+  fetch("/chat/report", { method: "POST", body, keepalive: true }).catch(() => {});
+}
 
 const setStatus = (text) => (statusEl.textContent = text);
 
@@ -84,7 +94,7 @@ function updateLayout() {
   grid.dataset.count = String(tiles.size);
   const others = tiles.size - (tiles.has("self") ? 1 : 0);
   $("count").textContent = `${tiles.size} of ${MAX_PEOPLE}`;
-  if (!ended && call) setStatus(others === 0 ? "Waiting for others… Share the link!" : "");
+  if (!ended && !reconnecting && call) setStatus(others === 0 ? "Waiting for others… Share the link!" : "");
 }
 
 function setChatEnabled(open) {
@@ -139,7 +149,10 @@ function wireCall() {
     const video = tiles.get(id)?.querySelector("video");
     if (video && video.srcObject !== stream) video.srcObject = stream;
   });
-  call.addEventListener("state", ({ detail: { id, state } }) => setTileState(id, state));
+  call.addEventListener("state", ({ detail: { id, state, diag } }) => {
+    setTileState(id, state);
+    if (state === "failed") report("peer-failed", { remote: id, ...diag });
+  });
   call.addEventListener("media", ({ detail: { id, mic, cam } }) => setTileMedia(id, { mic, cam }));
   call.addEventListener("chat", ({ detail: { id, text } }) => addMessage(text, { from: names.get(id) ?? "?" }));
   call.addEventListener("channels", ({ detail: { open } }) => setChatEnabled(open));
@@ -168,17 +181,32 @@ async function start() {
 
   signaling = openSignaling(roomId, {
     onOpen: () => {
-      setStatus("Joining…");
-      signaling.send({ type: "join", name });
+      if (!reconnecting) setStatus("Joining…");
+      signaling.send({ type: "join", name, resume: me ?? undefined });
     },
     onMessage: (msg) => {
       if (msg.type === "full") return end(`This room is full (${MAX_PEOPLE} people max).`);
       if (msg.type === "not-found") return end("This room doesn't exist or has expired.");
-      if (msg.type === "welcome") updateLayout();
+      if (msg.type === "welcome") {
+        me = { id: msg.id, token: msg.token };
+        joinedAt ||= Date.now();
+        const outage = signaling.recovered();
+        if (outage) report("reconnected", { ...lastDrop, ...outage, resumed: msg.resumed });
+        lastDrop = null;
+        reconnecting = false;
+        updateLayout();
+      }
       call.handleSignal(msg);
     },
-    onClose: () => {
-      if (!ended) end("Disconnected from server. Reload to retry.");
+    onDrop: ({ code, wasClean, online, visible }) => {
+      reconnecting = true;
+      setStatus("Reconnecting to the room… (video continues)");
+      lastDrop = { code, wasClean, online, visible, inCallMs: joinedAt ? Date.now() - joinedAt : 0 };
+      report("ws-close", lastDrop); // may not arrive if the server is what went away
+    },
+    onGiveUp: ({ downMs, attempts }) => {
+      report("gave-up", { ...lastDrop, downMs, attempts });
+      end("Lost the connection to the room. Reload to rejoin.");
     },
   });
 }
