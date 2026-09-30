@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { exports, env } from "cloudflare:workers";
 import { runDurableObjectAlarm } from "cloudflare:test";
-import { mintToken, stubJwks } from "./helpers";
+import { forbidOutboundFetch, mintToken } from "./helpers";
 
 const ORIGIN = "https://tinkers.poietic.tech";
 
@@ -38,7 +38,7 @@ async function connect(room: string) {
 }
 
 beforeEach(() => {
-  stubJwks();
+  forbidOutboundFetch();
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -79,6 +79,13 @@ describe("creating a room", () => {
 
   it("rejects a token from another issuer", async () => {
     const res = await createRoom(await sessionCookie({ iss: "https://evil.example" }));
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a token signed with a key the JWKS doesn't have", async () => {
+    // The production bug: an unknown kid forces a JWKS refetch, which used to
+    // go over plain fetch and crash the Worker (1101) instead of a 401.
+    const res = await createRoom(await sessionCookie({ header: { kid: "unknown-kid" } }));
     expect(res.status).toBe(401);
   });
 

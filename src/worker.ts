@@ -14,6 +14,8 @@ export { Room } from "./room";
 
 export interface Env {
   ASSETS: Fetcher;
+  /** poietic-auth, for its JWKS. See wrangler.jsonc for why not plain fetch. */
+  AUTH: Fetcher;
   ROOMS: DurableObjectNamespace<Room>;
   CF_TURN_KEY_ID?: string;
   CF_TURN_KEY_API_TOKEN?: string;
@@ -52,7 +54,14 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
   if (request.headers.get("origin") !== new URL(request.url).origin) {
     return json({ error: "forbidden" }, 403);
   }
-  const caller = await authenticate(request, env);
+  let caller;
+  try {
+    caller = await authenticate(request, env, env.AUTH.fetch.bind(env.AUTH) as typeof fetch);
+  } catch (err) {
+    // The public keys couldn't be loaded at all. Fail closed, but say so.
+    console.error("auth unavailable:", (err as Error).message);
+    return json({ error: "auth-unavailable" }, 503);
+  }
   if (!caller) return json({ error: "signin" }, 401);
 
   const id = crypto.randomUUID();

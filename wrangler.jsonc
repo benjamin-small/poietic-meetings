@@ -17,6 +17,13 @@
     "html_handling": "drop-trailing-slash"
   },
 
+  // Public keys come from poietic-auth over a service binding, NOT a fetch
+  // to https://auth.poietic.tech: a Worker's subrequest to another hostname
+  // in the same zone skips that hostname's Worker route and hits the
+  // placeholder origin (192.0.2.1), so the fetch fails. The site Worker in
+  // poietic-dot-tech hit the same thing; see its wrangler.jsonc.
+  "services": [{ "binding": "AUTH", "service": "poietic-auth" }],
+
   "durable_objects": {
     "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
   },
