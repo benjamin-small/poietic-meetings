@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { exports, env } from "cloudflare:workers";
-import { runDurableObjectAlarm } from "cloudflare:test";
+import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { forbidOutboundFetch, mintToken } from "./helpers";
-import { MAX_PEERS, cleanName } from "../src/room";
+import { GRACE_MS, MAX_PEERS, STALE_MS, cleanName, type Room } from "../src/room";
 
 const ORIGIN = "https://tinkers.poietic.tech";
 
@@ -48,12 +48,27 @@ async function connect(room: string) {
   return { ws, messages, waitFor, send: sendJson };
 }
 
-/** Connect and join; resolves once the server's welcome arrives. */
-async function join(room: string, name = "Guest") {
+type Welcome = Msg & { id: string; token: string; resumed: boolean; peers: { id: string; name: string }[] };
+
+/** Connect and join (optionally resuming); resolves once the server's welcome arrives. */
+async function join(room: string, name = "Guest", resume?: { id: string; token: string }) {
   const peer = await connect(room);
-  peer.send({ type: "join", name });
-  const welcome = (await peer.waitFor("welcome")) as Msg & { id: string; peers: { id: string; name: string }[] };
-  return { ...peer, id: welcome.id, welcome };
+  peer.send({ type: "join", name, resume });
+  const welcome = (await peer.waitFor("welcome")) as Welcome;
+  const closed = new Promise<number>((r) => peer.ws.addEventListener("close", (e: CloseEvent) => r(e.code)));
+  return { ...peer, id: welcome.id, token: welcome.token, welcome, closed };
+}
+
+const roomStub = (id: string) => env.ROOMS.get(env.ROOMS.idFromName(id));
+const settle = () => new Promise((r) => setTimeout(r, 100));
+
+/** Pretend `peerId` dropped `ms` ago, so the next sweep treats their grace as spent. */
+async function ageGrace(room: string, peerId: string, ms = GRACE_MS + 1) {
+  await runInDurableObject(roomStub(room), async (_i: Room, state) => {
+    const p = await state.storage.get<{ goneSince?: number }>(`person:${peerId}`);
+    expect(p?.goneSince).toBeTypeOf("number");
+    await state.storage.put(`person:${peerId}`, { ...p, goneSince: Date.now() - ms });
+  });
 }
 
 beforeEach(() => {
@@ -216,6 +231,7 @@ describe("signaling", () => {
     const id = await newRoomId();
     for (let i = 0; i < MAX_PEERS; i++) await join(id, `P${i}`);
     const extra = await connect(id);
+    extra.send({ type: "join", name: "Extra" });
     await extra.waitFor("full");
   });
 
@@ -231,7 +247,7 @@ describe("signaling", () => {
 
   it("frees a slot when someone leaves", async () => {
     const id = await newRoomId();
-    const peers = [];
+    const peers: Awaited<ReturnType<typeof join>>[] = [];
     for (let i = 0; i < MAX_PEERS; i++) peers.push(await join(id, `P${i}`));
     peers[0]!.ws.close(1000, "bye");
     await peers[1]!.waitFor("peer-left");
@@ -271,8 +287,9 @@ describe("expiry", () => {
   it("keeps a room alive while someone is connected", async () => {
     const id = await newRoomId();
     await join(id);
-    // Connecting cancels the alarm, so there's nothing to run.
-    expect(await runDurableObjectAlarm(stubFor(id))).toBe(false);
+    // While anyone is present the alarm only sweeps; it never expires the room.
+    expect(await runDurableObjectAlarm(stubFor(id))).toBe(true);
+    expect(await runDurableObjectAlarm(stubFor(id))).toBe(true);
     expect((await call(`/chat/r/${id}`)).status).toBe(200);
   });
 
@@ -280,7 +297,176 @@ describe("expiry", () => {
     const id = await newRoomId();
     const a = await join(id);
     a.ws.close(1000, "bye");
-    await vi.waitFor(async () => expect(await runDurableObjectAlarm(stubFor(id))).toBe(true));
-    expect((await call(`/chat/r/${id}`)).status).toBe(404);
+    await vi.waitFor(async () => {
+      await runDurableObjectAlarm(stubFor(id));
+      expect((await call(`/chat/r/${id}`)).status).toBe(404);
+    });
+  });
+});
+
+describe("heartbeat", () => {
+  it("answers pings without involving the room code", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const pong = new Promise<string>((r) =>
+      a.ws.addEventListener("message", (e: MessageEvent) => e.data === '{"type":"pong"}' && r(e.data)),
+    );
+    a.ws.send('{"type":"ping"}');
+    expect(await pong).toBe('{"type":"pong"}');
+  });
+
+  it("closes a connection that stopped pinging, then lets the person go after the grace period", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const b = await join(id, "B");
+    await runInDurableObject(roomStub(id), (_i: Room, state) => {
+      for (const ws of state.getWebSockets()) {
+        const att = ws.deserializeAttachment() as { id?: string; connectedAt: number };
+        if (att.id === a.id) ws.serializeAttachment({ ...att, connectedAt: Date.now() - STALE_MS - 1000 });
+      }
+    });
+    await runDurableObjectAlarm(roomStub(id));
+    expect(await a.closed).toBe(4001);
+    await settle();
+    expect(b.messages.some((m) => m.type === "peer-left")).toBe(false); // still in grace
+    await ageGrace(id, a.id);
+    await runDurableObjectAlarm(roomStub(id));
+    expect(await b.waitFor("peer-left")).toMatchObject({ id: a.id });
+  });
+});
+
+describe("reconnecting", () => {
+  it("lets a dropped peer rejoin silently with the same id", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const b = await join(id, "B");
+    a.ws.close(4000, "network blip"); // not 1000/1001: an accidental drop
+    const a2 = await join(id, "A", { id: a.id, token: a.token });
+    expect(a2.welcome).toMatchObject({ id: a.id, token: a.token, resumed: true, peers: [{ id: b.id, name: "B" }] });
+    // Signaling now reaches the new connection.
+    b.send({ type: "offer", to: a.id, sdp: {} });
+    expect(await a2.waitFor("offer")).toMatchObject({ from: b.id });
+    // B never saw A leave or rejoin, even after a sweep.
+    await runDurableObjectAlarm(roomStub(id));
+    await settle();
+    expect(b.messages.map((m) => m.type)).toEqual(["welcome"]);
+  });
+
+  it("treats a wrong token as a new person", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const b = await join(id, "B");
+    a.ws.close(4000, "drop");
+    const imposter = await join(id, "A?", { id: a.id, token: "not-the-token" });
+    expect(imposter.welcome.resumed).toBe(false);
+    expect(imposter.id).not.toBe(a.id);
+    expect(await b.waitFor("peer-joined")).toMatchObject({ id: imposter.id });
+  });
+
+  it("tells everyone once a dropped peer's grace period runs out", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const b = await join(id, "B");
+    a.ws.close(4000, "drop");
+    await vi.waitFor(async () => ageGrace(id, a.id));
+    await runDurableObjectAlarm(roomStub(id));
+    expect(await b.waitFor("peer-left")).toMatchObject({ id: a.id });
+    // Too late to resume now: A comes back as someone new.
+    const late = await join(id, "A", { id: a.id, token: a.token });
+    expect(late.welcome.resumed).toBe(false);
+  });
+
+  it("completes the close handshake when the client closes", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const started = Date.now();
+    const closed = new Promise<{ code: number; wasClean: boolean }>((r) =>
+      a.ws.addEventListener("close", (e: CloseEvent) => r({ code: e.code, wasClean: e.wasClean })),
+    );
+    a.ws.close(4000, "client closing");
+    const result = await closed;
+    // Without a reply, clients only give up after ~10s and report 1006.
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(result.code).toBe(4000);
+  });
+
+  it("a deliberate leave skips the grace period", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const b = await join(id, "B");
+    a.send({ type: "leave" });
+    expect(await b.waitFor("peer-left")).toMatchObject({ id: a.id });
+    expect(await a.closed).toBe(1000);
+  });
+
+  it("closes the old socket when a peer resumes on a new one, without marking them gone", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const b = await join(id, "B");
+    const a2 = await join(id, "A", { id: a.id, token: a.token }); // old socket still open
+    expect(a2.welcome.resumed).toBe(true);
+    expect(await a.closed).toBe(4002);
+    await settle();
+    await runInDurableObject(roomStub(id), async (_i: Room, state) => {
+      expect((await state.storage.get<{ goneSince?: number }>(`person:${a.id}`))?.goneSince).toBeUndefined();
+    });
+    expect(b.messages.some((m) => m.type === "peer-left")).toBe(false);
+  });
+
+  it("survives the room object being reset: everyone resumes, and no-shows are let go", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const b = await join(id, "B");
+    const c = await join(id, "C");
+    await abortAllDurableObjects(); // what we suspect happened in production
+    const a2 = await join(id, "A", { id: a.id, token: a.token });
+    const b2 = await join(id, "B", { id: b.id, token: b.token });
+    expect(a2.welcome.resumed).toBe(true);
+    expect(b2.welcome.resumed).toBe(true);
+    expect(a2.welcome.peers.map((p) => p.id).sort()).toEqual([b.id, c.id].sort());
+    // C never comes back: the sweep notices, and after grace everyone is told.
+    await runDurableObjectAlarm(roomStub(id));
+    await ageGrace(id, c.id);
+    await runDurableObjectAlarm(roomStub(id));
+    expect(await a2.waitFor("peer-left")).toMatchObject({ id: c.id });
+    expect(await b2.waitFor("peer-left")).toMatchObject({ id: c.id });
+  });
+
+  it("counts people in their grace period toward the cap", async () => {
+    const id = await newRoomId();
+    const peers: Awaited<ReturnType<typeof join>>[] = [];
+    for (let i = 0; i < MAX_PEERS; i++) peers.push(await join(id, `P${i}`));
+    peers[0]!.ws.close(4000, "drop");
+    await settle();
+    const extra = await connect(id);
+    extra.send({ type: "join", name: "Extra" });
+    await extra.waitFor("full");
+    await vi.waitFor(async () => ageGrace(id, peers[0]!.id));
+    await runDurableObjectAlarm(roomStub(id));
+    const late = await join(id, "Late");
+    expect(late.welcome.peers).toHaveLength(MAX_PEERS - 1);
+  });
+});
+
+describe("client reports", () => {
+  const post = (body: unknown, origin = ORIGIN) =>
+    call("/chat/report", { method: "POST", headers: { origin }, body: typeof body === "string" ? body : JSON.stringify(body) });
+
+  it("logs whitelisted fields only, clipped", async () => {
+    const logged: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((line: string) => void logged.push(line));
+    const res = await post({ event: "ws-close", room: "0123456789abcdef", code: 1006, online: true, secret: "nope", peer: "x".repeat(200) });
+    expect(res.status).toBe(204);
+    const entry = JSON.parse(logged.find((l) => l.includes("client:ws-close"))!);
+    expect(entry).toMatchObject({ event: "client:ws-close", room: "01234567", code: 1006, online: true });
+    expect(entry.secret).toBeUndefined();
+    expect(entry.peer).toHaveLength(64);
+  });
+
+  it("rejects other sites, unknown events, bad JSON and oversized bodies", async () => {
+    expect((await post({ event: "ws-close" }, "https://evil.example")).status).toBe(403);
+    expect((await post({ event: "anything" })).status).toBe(400);
+    expect((await post("{not json")).status).toBe(400);
+    expect((await post({ event: "ws-close", pad: "x".repeat(5000) })).status).toBe(413);
   });
 });

@@ -23,6 +23,26 @@ It's one Cloudflare Worker, `poietic-tinkers`, serving `tinkers.poietic.tech`:
 - **TURN** ([src/turn.ts](src/turn.ts)): gets credentials from Cloudflare that are valid for 24 hours and reused for an hour. If Cloudflare fails, it falls back to STUN only.
 - **Client** ([public/](public/)): plain HTML, CSS and JavaScript modules, with no build step.
 
+## Staying connected
+
+Video runs peer to peer, so a dropped connection to the room server doesn't stop the call. It only pauses new signaling.
+
+- **Heartbeat:** browsers send `{"type":"ping"}` every 20s. Cloudflare answers `{"type":"pong"}` itself without waking the room. A browser that hears no pong for 45s abandons the socket, and the room closes sockets that haven't pinged for 60s.
+- **Reconnect and resume:** a dropped browser reconnects with backoff (0.5s up to 15s, giving up after 2 minutes) and rejoins with the `{id, token}` from its welcome. Its existing calls keep running and nobody sees it leave. Anyone who joined meanwhile gets connected when it's back.
+- **Grace period:** people are stored in the room's storage, not tied to sockets. A drop starts a 30s window to come back, including when the room object itself is reset and every socket vanishes at once. After that, everyone gets `peer-left`. Clicking **Leave** or closing the tab skips the wait.
+
+## Observability
+
+Everything lands in **Workers Logs** for `poietic-tinkers` (Cloudflare dashboard → Workers → poietic-tinkers → Logs), as one JSON line per event:
+
+| `event` | From | Meaning |
+|---|---|---|
+| `connect`, `join` (`resumed`), `leave` (`how`), `close` (`code`, `how`), `stale`, `missing`, `reject`, `expire` | room | Room lifecycle. Room IDs are cut to 8 characters, peers are random IDs, and names are never logged. |
+| `client:ws-close`, `client:reconnected`, `client:gave-up` | browser | Signaling drops: close code, time in the call, downtime, attempts, online/visible. |
+| `client:peer-failed` | browser | A video connection that didn't come up: ICE/connection state and which local candidate types were gathered (host/srflx/relay). |
+
+Browser reports go to `POST /chat/report`. It accepts same-origin requests only, a fixed list of fields, clipped values and at most 2 KB. The Worker adds coarse client info (OS, browser, network owner, HTTP version). Filter on `event` in the Logs view, for example `client:*` or `room = <first 8 chars>`.
+
 ## Development
 
 ```bash

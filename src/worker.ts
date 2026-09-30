@@ -4,6 +4,7 @@
 //   POST /chat/rooms         create a room (signed-in poietic users only)
 //   GET  /chat/config?room=  ICE servers incl. TURN, only for existing rooms
 //   GET  /chat/ws?room=      WebSocket to the room's Durable Object
+//   POST /chat/report        client diagnostics (dropped sockets, failed peers) → Workers Logs
 //   everything else          static assets from public/
 
 import { authenticate } from "./auth";
@@ -36,6 +37,57 @@ function iceServersFor(env: Env): Promise<IceServer[]> {
     fallback: STUN_ONLY,
   });
   return getIceServers();
+}
+
+// What a browser may report, and nothing else. Values are clipped, so a
+// report can't smuggle arbitrary text into the logs.
+const REPORT_EVENTS = new Set(["ws-close", "reconnected", "gave-up", "peer-failed"]);
+const REPORT_FIELDS: Record<string, "string" | "number" | "boolean"> = {
+  room: "string",
+  peer: "string",
+  remote: "string",
+  code: "number",
+  wasClean: "boolean",
+  inCallMs: "number",
+  downMs: "number",
+  attempts: "number",
+  resumed: "boolean",
+  online: "boolean",
+  visible: "boolean",
+  iceState: "string",
+  connState: "string",
+  localCandidates: "string",
+  peers: "number",
+};
+const REPORT_MAX_BYTES = 2048;
+
+async function report(request: Request): Promise<Response> {
+  if (request.headers.get("origin") !== new URL(request.url).origin) return json({ error: "forbidden" }, 403);
+  const text = await request.text();
+  if (text.length > REPORT_MAX_BYTES) return json({ error: "too-large" }, 413);
+  let body: Record<string, unknown>;
+  try {
+    body = JSON.parse(text);
+  } catch {
+    return json({ error: "bad-json" }, 400);
+  }
+  if (typeof body.event !== "string" || !REPORT_EVENTS.has(body.event)) return json({ error: "bad-event" }, 400);
+  const clean: Record<string, unknown> = { event: `client:${body.event}` };
+  for (const [key, type] of Object.entries(REPORT_FIELDS)) {
+    const v = body[key];
+    if (typeof v !== type) continue;
+    clean[key] = type === "string" ? String(v).slice(0, 64) : v;
+  }
+  if (typeof clean.room === "string") clean.room = clean.room.slice(0, 8);
+  // Coarse client info from headers; enough to spot "Android Chrome" patterns.
+  const ua = request.headers.get("user-agent") ?? "";
+  clean.client = /Android/.test(ua) ? "android" : /iPhone|iPad/.test(ua) ? "ios" : /Mac OS X/.test(ua) ? "mac" : /Windows/.test(ua) ? "windows" : "other";
+  clean.browser = /Edg\//.test(ua) ? "edge" : /Firefox\//.test(ua) ? "firefox" : /Chrome\//.test(ua) ? "chrome" : /Safari\//.test(ua) ? "safari" : "other";
+  const cf = (request as { cf?: { asOrganization?: string; httpProtocol?: string } }).cf;
+  clean.network = cf?.asOrganization?.slice(0, 48);
+  clean.protocol = cf?.httpProtocol;
+  console.log(JSON.stringify(clean));
+  return new Response(null, { status: 204 });
 }
 
 const json = (body: unknown, status = 200) =>
@@ -84,6 +136,10 @@ export default {
 
     if (url.pathname === "/chat/rooms" && request.method === "POST") {
       return createRoom(request, env);
+    }
+
+    if (url.pathname === "/chat/report" && request.method === "POST") {
+      return report(request);
     }
 
     if (url.pathname === "/chat/config") {
