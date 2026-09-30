@@ -9,25 +9,47 @@
 </head>
 <body>
   <main class="stage">
-    <section class="videos">
-      <video id="remote" autoplay playsinline></video>
-      <div id="status" class="status">Starting…</div>
-      <video id="local" autoplay playsinline muted></video>
+    <section class="call">
+      <header class="bar">
+        <a href="/chat" class="brand">Tinker Chat</a>
+        <span id="count" class="count"></span>
+        <button id="copy" title="Copy room link">Copy link</button>
+      </header>
+      <div id="grid" class="grid" data-count="1"></div>
+      <div id="status" class="status" role="status">Starting…</div>
       <nav class="controls">
         <button id="mic" title="Mute microphone">Mic on</button>
         <button id="cam" title="Turn camera off">Cam on</button>
-        <button id="copy" title="Copy room link">Copy link</button>
         <button id="leave" class="danger" title="Leave room">Leave</button>
       </nav>
     </section>
     <aside class="chat">
       <ol id="messages"></ol>
       <form id="chat-form">
-        <input id="chat-input" autocomplete="off" placeholder="Connect to chat…" disabled />
+        <input id="chat-input" autocomplete="off" maxlength="2000" placeholder="Waiting for others…" disabled />
         <button disabled>Send</button>
       </form>
     </aside>
   </main>
+
+  <dialog id="join-dialog">
+    <form id="join-form" method="dialog">
+      <h2>Join the call</h2>
+      <label for="name-input">Your name</label>
+      <input id="name-input" maxlength="32" autocomplete="nickname" required />
+      <p class="hint">Shown to everyone in this room. Your camera and mic turn on when you join.</p>
+      <button class="primary">Join</button>
+    </form>
+  </dialog>
+
+  <template id="tile-template">
+    <div class="tile">
+      <video autoplay playsinline></video>
+      <div class="avatar"></div>
+      <div class="label"><span class="name"></span><span class="muted" hidden>muted</span><span class="state"></span></div>
+    </div>
+  </template>
+
   <script src="/chat/app.js" type="module"></script>
 </body>
 </html>
