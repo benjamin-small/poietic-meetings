@@ -1,0 +1,21 @@
+{
+  "name": "web-rtc-tinker",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "vitest run",
+    "dev": "wrangler dev",
+    "typecheck": "tsc",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types --include-runtime=false"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260930.2",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.144.0"
+  },
+  "type": "module",
+  "private": true,
+  "description": "Tinker Chat: 1:1 WebRTC video chat at tinkers.poietic.tech/chat"
+}

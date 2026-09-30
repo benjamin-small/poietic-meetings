@@ -1,0 +1,27 @@
+{
+  // Worker name is fixed by poietic-dot-tech infra/tinkers.tf (project-site
+  // module: poietic-<subdomain>). OpenTofu owns the Worker's existence, DNS
+  // and route; this repo owns what it serves.
+  "name": "poietic-tinkers",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-01",
+  "observability": { "enabled": true },
+
+  // Routing stays in OpenTofu (tinkers.poietic.tech/*); don't let wrangler
+  // create a workers.dev URL or its own routes.
+  "workers_dev": false,
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "html_handling": "drop-trailing-slash"
+  },
+
+  "durable_objects": {
+    "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }]
+
+  // Secrets (set by CI with `wrangler secret put`, never committed):
+  //   CF_TURN_KEY_ID, CF_TURN_KEY_API_TOKEN
+}

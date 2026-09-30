@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tinker Chat</title>
+  <meta name="robots" content="noindex" />
+  <link rel="stylesheet" href="/chat/style.css" />
+</head>
+<body>
+  <main class="stage">
+    <section class="videos">
+      <video id="remote" autoplay playsinline></video>
+      <div id="status" class="status">Starting…</div>
+      <video id="local" autoplay playsinline muted></video>
+      <nav class="controls">
+        <button id="mic" title="Mute microphone">Mic on</button>
+        <button id="cam" title="Turn camera off">Cam on</button>
+        <button id="copy" title="Copy room link">Copy link</button>
+        <button id="leave" class="danger" title="Leave room">Leave</button>
+      </nav>
+    </section>
+    <aside class="chat">
+      <ol id="messages"></ol>
+      <form id="chat-form">
+        <input id="chat-input" autocomplete="off" placeholder="Connect to chat…" disabled />
+        <button disabled>Send</button>
+      </form>
+    </aside>
+  </main>
+  <script src="/chat/app.js" type="module"></script>
+</body>
+</html>
