@@ -3,6 +3,7 @@ import { MeshCall } from "/chat/mesh.js";
 
 const MAX_PEOPLE = 6; // matches MAX_PEERS in src/room.ts
 const NAME_KEY = "tinker-chat-name";
+const MAX_MESSAGES = 200; // older chat lines are dropped, so a flood can't grow the page forever
 
 const $ = (id) => document.getElementById(id);
 const grid = $("grid");
@@ -46,6 +47,7 @@ function addMessage(text, { from, cls } = {}) {
   }
   li.append(text);
   messages.append(li);
+  while (messages.childElementCount > MAX_MESSAGES) messages.firstElementChild.remove();
   messages.scrollTop = messages.scrollHeight;
 }
 
@@ -105,6 +107,9 @@ function setChatEnabled(open) {
 function end(text) {
   ended = true;
   setStatus(text);
+  // We're out of the room: stop the camera and mic, and drop any calls.
+  call?.leave();
+  localStream?.getTracks().forEach((t) => t.stop());
 }
 
 // --- Join flow ---
@@ -119,19 +124,48 @@ function defaultName() {
 function askName() {
   const dialog = $("join-dialog");
   const input = $("name-input");
+  const again = $("join-again");
   input.value = defaultName();
   return new Promise((resolve) => {
+    let named = false;
     $("join-form").onsubmit = () => {
+      named = true;
       const name = input.value.trim().slice(0, 32) || "Guest";
       try {
         localStorage.setItem(NAME_KEY, name);
       } catch {}
       resolve(name);
     };
-    dialog.addEventListener("cancel", (e) => e.preventDefault()); // must pick a name
+    // Esc or Android back can close the dialog no matter what we do
+    // (browsers ignore preventDefault without a user gesture), so don't
+    // strand the page: offer a button to open it again.
+    dialog.onclose = () => {
+      if (named) return;
+      setStatus("Pick a name to join.");
+      again.hidden = false;
+    };
+    again.onclick = () => {
+      again.hidden = true;
+      setStatus("");
+      dialog.showModal();
+      input.select();
+    };
     dialog.showModal();
     input.select();
   });
+}
+
+/** Camera and mic if we can; otherwise whichever works; otherwise just watch and chat. */
+async function getMedia() {
+  const video = { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24 } };
+  for (const constraints of [{ video, audio: true }, { audio: true }, { video }]) {
+    try {
+      return await navigator.mediaDevices.getUserMedia(constraints);
+    } catch (err) {
+      console.warn("getUserMedia", Object.keys(constraints).join("+"), err.name);
+    }
+  }
+  return new MediaStream();
 }
 
 function wireCall() {
@@ -141,7 +175,7 @@ function wireCall() {
     addMessage(`${name} joined`, { cls: "sys" });
   });
   call.addEventListener("peer-left", ({ detail: { id } }) => {
-    if (names.has(id)) addMessage(`${names.get(id)} left`, { cls: "sys" });
+    if (names.has(id) && !ended) addMessage(`${names.get(id)} left`, { cls: "sys" });
     names.delete(id);
     removeTile(id);
   });
@@ -161,22 +195,18 @@ function wireCall() {
 async function start() {
   const name = await askName();
   setStatus("Starting camera…");
-  let iceServers;
-  try {
-    ({ iceServers } = await (await fetch(`/chat/config?room=${roomId}`)).json());
-    localStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 24 } },
-      audio: true,
-    });
-  } catch (err) {
-    console.error(err);
-    return end(`Couldn't access camera/microphone: ${err.message}`);
-  }
+  localStream = await getMedia();
+  const media = { mic: localStream.getAudioTracks().length > 0, cam: localStream.getVideoTracks().length > 0 };
+  if (!media.cam) Object.assign($("cam"), { disabled: true, textContent: "No camera" });
+  if (!media.mic) Object.assign($("mic"), { disabled: true, textContent: "No mic" });
 
   addTile("self", name).querySelector("video").srcObject = localStream;
+  setTileMedia("self", media);
 
-  call = new MeshCall({ iceServers, forceRelay, sendSignal: (msg) => signaling.send(msg) });
+  // ICE servers (including TURN) arrive with the room's welcome.
+  call = new MeshCall({ forceRelay, sendSignal: (msg) => signaling.send(msg) });
   call.start(localStream);
+  call.setMediaState(media);
   wireCall();
 
   signaling = openSignaling(roomId, {
@@ -185,7 +215,10 @@ async function start() {
       signaling.send({ type: "join", name, resume: me ?? undefined });
     },
     onMessage: (msg) => {
-      if (msg.type === "full") return end(`This room is full (${MAX_PEOPLE} people max).`);
+      if (msg.type === "full") {
+        if (reconnecting) return; // temporary while we're coming back; signaling retries
+        return end(`This room is full (${MAX_PEOPLE} people max).`);
+      }
       if (msg.type === "not-found") return end("This room doesn't exist or has expired.");
       if (msg.type === "welcome") {
         me = { id: msg.id, token: msg.token };
@@ -228,15 +261,20 @@ function toggle(button, kind, onLabel, offLabel) {
 $("mic").onclick = (e) => toggle(e.currentTarget, "audio", "Mic on", "Mic off");
 $("cam").onclick = (e) => toggle(e.currentTarget, "video", "Cam on", "Cam off");
 $("copy").onclick = async (e) => {
-  await navigator.clipboard.writeText(location.origin + location.pathname);
-  e.currentTarget.textContent = "Copied!";
-  setTimeout(() => ($("copy").textContent = "Copy link"), 1500);
+  const button = e.currentTarget; // gone once we await
+  try {
+    await navigator.clipboard.writeText(location.origin + location.pathname);
+    button.textContent = "Copied!";
+  } catch {
+    button.textContent = "Couldn't copy";
+  }
+  setTimeout(() => (button.textContent = "Copy link"), 1500);
 };
-$("leave").onclick = () => {
+$("leave").onclick = async () => {
   ended = true;
   call?.leave();
-  signaling?.close();
   localStream?.getTracks().forEach((t) => t.stop());
+  await signaling?.close(me ?? undefined); // says goodbye even mid-reconnect
   location.href = "/chat";
 };
 

@@ -10,8 +10,10 @@ export interface IceServer {
 
 export const STUN_ONLY: IceServer[] = [{ urls: "stun:stun.cloudflare.com:3478" }];
 
-const CREDENTIAL_TTL = 24 * 60 * 60; // seconds each credential stays valid
-const REUSE_FOR = 60 * 60 * 1000; // ms to share one credential across visitors
+// Long enough to outlast a call (TURN allocations refresh with the same
+// credential), short enough to limit reuse outside the app.
+const CREDENTIAL_TTL = 6 * 60 * 60; // seconds each credential stays valid
+const REUSE_FOR = 60 * 60 * 1000; // ms to share one credential between people in a room
 
 interface Options {
   keyId: string;
