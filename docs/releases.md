@@ -1,5 +1,5 @@
 # Releases
 
-web-rtc-tinker uses semantic versioning when it publishes versioned artifacts. User-visible changes should be summarized in release notes, including upgrade steps and breaking changes.
+web-rtc-tinker is a single deployed Worker, not a versioned package. There are no version numbers, tags or release notes.
 
-Before a release, run the repository's documented validation commands, confirm generated artifacts are current, and verify the release from a clean checkout.
+Every push to `main` that passes CI deploys `poietic-tinkers` to <https://tinkers.poietic.tech> (see [.github/workflows/ci.yml](../.github/workflows/ci.yml)). Merging a pull request is the release, so describe user-visible changes in the pull request itself.
