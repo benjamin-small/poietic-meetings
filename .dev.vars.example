@@ -1,0 +1,5 @@
+# Copy to .dev.vars (gitignored). See docs/configuration.md.
+DEV_AUTH_BYPASS=1
+# Optional: real TURN locally. Values are in Infisical, env dev.
+# CF_TURN_KEY_ID=
+# CF_TURN_KEY_API_TOKEN=

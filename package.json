@@ -7,16 +7,22 @@
     "typecheck": "tsc",
     "deploy": "wrangler deploy",
     "types": "wrangler types --include-runtime=false",
-    "check:client": "for f in public/chat/*.js; do node --check \"$f\" || exit 1; done"
+    "check:client": "for f in public/chat/*.js; do node --check \"$f\" || exit 1; done",
+    "coverage": "vitest run --coverage && vitest run --config vitest.client.config.ts --coverage"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",
     "@cloudflare/workers-types": "^5.20260930.2",
+    "@vitest/coverage-istanbul": "^4.1.11",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11",
     "wrangler": "^4.144.0"
   },
   "type": "module",
   "private": true,
-  "description": "Tinker Chat: 1:1 WebRTC video chat at tinkers.poietic.tech/chat"
+  "description": "Tinker Chat: 1:1 WebRTC video chat at tinkers.poietic.tech/chat",
+  "engines": {
+    "node": ">=24"
+  },
+  "license": "MIT"
 }
