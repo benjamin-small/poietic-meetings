@@ -139,12 +139,114 @@ describe("MeshCall", () => {
     expect(events.filter((e) => e.type === "chat")).toHaveLength(11);
   });
 
-  it("still receives audio and video without a camera or mic", async () => {
+  it("still receives audio and video without a camera or mic, and can send video later", async () => {
     const { call } = makeCall(stream());
     await call.handleSignal(welcome("a", [{ id: "b", name: "B" }]));
-    expect(FakePeerConnection.all[0].transceivers).toEqual([
-      { kind: "audio", direction: "recvonly" },
-      { kind: "video", direction: "recvonly" },
+    const pc = FakePeerConnection.all[0];
+    expect(pc.transceivers.map((t) => [t.receiver.track.kind, t.direction, t.sender.track])).toEqual([
+      ["audio", "recvonly", null],
+      ["video", "sendrecv", null], // empty until a screen is shared
     ]);
   });
 });
+
+/** The track each connection is sending as video. */
+const sentVideo = (pc) =>
+  pc.transceivers.find((t) => t.mid !== null && t.receiver.track.kind === "video" && t.direction !== "recvonly")?.sender.track;
+
+describe("sharing a screen", () => {
+  const screen = { kind: "video", label: "screen" };
+
+  it("swaps the video it sends on every connection, and back", async () => {
+    const media = stream("audio", "video");
+    const camera = media.getTracks()[1];
+    const { call } = makeCall(media);
+    await call.handleSignal(welcome("a", [{ id: "b", name: "B" }, { id: "c", name: "C" }]));
+    const [pcB, pcC] = FakePeerConnection.all;
+
+    await call.setVideoTrack(screen);
+    expect([sentVideo(pcB), sentVideo(pcC)]).toEqual([screen, screen]);
+    expect(FakePeerConnection.all).toHaveLength(2); // no new connections or offers needed
+
+    await call.setVideoTrack(camera);
+    expect([sentVideo(pcB), sentVideo(pcC)]).toEqual([camera, camera]);
+  });
+
+  it("sends the screen to people who join while it's shared", async () => {
+    const { call } = makeCall();
+    await call.handleSignal(welcome("a", []));
+    await call.setVideoTrack(screen);
+
+    await call.handleSignal({ type: "peer-joined", id: "n", name: "New" });
+    await call.handleSignal({ type: "offer", from: "n", sdp: { type: "offer", sdp: "x" } });
+    expect(sentVideo(FakePeerConnection.all.at(-1))).toBe(screen);
+
+    await call.handleSignal(welcome("a", [{ id: "m", name: "M" }])); // and to people we offer to
+    expect(sentVideo(FakePeerConnection.all.at(-1))).toBe(screen);
+  });
+
+  it("can share without a camera, whichever side made the offer", async () => {
+    // We offer: the empty video slot we made gets the screen.
+    const offering = makeCall(stream("audio"));
+    await offering.call.handleSignal(welcome("a", [{ id: "b", name: "B" }]));
+    await offering.call.setVideoTrack(screen);
+    expect(sentVideo(FakePeerConnection.all.at(-1))).toBe(screen);
+
+    // They offer: the slot their offer made is switched to send too, before we answer.
+    const answering = makeCall(stream("audio"));
+    await answering.call.handleSignal(welcome("a", []));
+    await answering.call.handleSignal({ type: "peer-joined", id: "n", name: "New" });
+    await answering.call.handleSignal({ type: "offer", from: "n", sdp: { type: "offer", sdp: "x" } });
+    const pc = FakePeerConnection.all.at(-1);
+    expect(pc.transceivers.filter((t) => t.receiver.track.kind === "video").map((t) => t.direction)).toEqual(["sendrecv"]);
+    await answering.call.setVideoTrack(screen);
+    expect(sentVideo(pc)).toBe(screen);
+  });
+
+  it("tells peers it's sharing, and passes on that they are", async () => {
+    const { call, events } = makeCall();
+    call.addEventListener("media", (e) => events.push({ type: "media", ...e.detail }));
+    await call.handleSignal(welcome("a", [{ id: "b", name: "B" }]));
+    const channel = FakePeerConnection.all[0].channels[0];
+    channel.open();
+    call.setMediaState({ screen: true });
+    expect(JSON.parse(channel.sent.at(-1))).toEqual({ t: "media", mic: true, cam: true, screen: true });
+
+    channel.receive({ t: "media", mic: true, cam: true, screen: true });
+    channel.receive({ t: "media", mic: true, cam: false });
+    expect(events.filter((e) => e.type === "media")).toEqual([
+      { type: "media", id: "b", mic: true, cam: true, screen: true },
+      { type: "media", id: "b", mic: true, cam: false, screen: false },
+    ]);
+  });
+
+  it("files video that arrives without a stream with their audio", async () => {
+    const { call } = makeCall();
+    const streams = [];
+    call.addEventListener("stream", (e) => streams.push(e.detail.stream));
+    await call.handleSignal(welcome("a", [{ id: "b", name: "B" }]));
+    const pc = FakePeerConnection.all[0];
+    const theirs = { addTrack: vi.fn() };
+    const video = { kind: "video" };
+    pc.ontrack({ track: { kind: "audio" }, streams: [theirs] });
+    pc.ontrack({ track: video, streams: [] });
+    expect(streams).toEqual([theirs, theirs]);
+    expect(theirs.addTrack).toHaveBeenCalledWith(video);
+  });
+
+  it("gives a shared screen more upload, so text stays readable", async () => {
+    const { call } = makeCall();
+    await call.handleSignal(welcome("a", "bcdef".split("").map((id) => ({ id, name: id }))));
+    const maxBitrate = () => {
+      const sender = sentVideoSender(FakePeerConnection.all[0]);
+      return sender.lastParams?.encodings[0].maxBitrate;
+    };
+    expect(maxBitrate()).toBe(300_000); // 1.5 Mbps over 5 people
+    call.setMediaState({ screen: true });
+    expect(maxBitrate()).toBe(500_000); // 2.5 Mbps over 5
+    call.setMediaState({ screen: false });
+    expect(maxBitrate()).toBe(300_000);
+  });
+});
+
+const sentVideoSender = (pc) => pc.transceivers.find((t) => t.receiver.track.kind === "video").sender;

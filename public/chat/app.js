@@ -23,6 +23,7 @@ const tiles = new Map(); // peer id ("self" for us) -> tile element
 let signaling;
 let call;
 let localStream;
+let screen = null; // the shared screen's stream, while sharing
 let ended = false;
 let me = null; // { id, token } from the server's welcome; used to resume after a drop
 let joinedAt = 0;
@@ -85,11 +86,23 @@ function setTileState(id, state) {
   tile.classList.toggle("failed", state === "failed");
 }
 
-function setTileMedia(id, { mic, cam }) {
+function setTileMedia(id, { mic, cam, screen = false }) {
   const tile = tiles.get(id);
   if (!tile) return;
   tile.querySelector(".muted").hidden = mic;
   tile.classList.toggle("cam-off", !cam);
+  tile.classList.toggle("screen", screen); // shown whole, not cropped or mirrored
+}
+
+/** What we're sending, for our tile and for everyone else's. A shared screen counts as video. */
+function sendMediaState() {
+  const media = {
+    mic: localStream?.getAudioTracks()[0]?.enabled ?? false,
+    cam: screen ? true : (localStream?.getVideoTracks()[0]?.enabled ?? false),
+    screen: screen !== null,
+  };
+  setTileMedia("self", media);
+  call?.setMediaState(media);
 }
 
 function updateLayout() {
@@ -109,7 +122,15 @@ function end(text) {
   setStatus(text);
   // We're out of the room: stop the camera and mic, and drop any calls.
   call?.leave();
+  stopTracks();
+}
+
+function stopTracks() {
   localStream?.getTracks().forEach((t) => t.stop());
+  screen?.getTracks().forEach((t) => {
+    t.onended = null;
+    t.stop();
+  });
 }
 
 // --- Join flow ---
@@ -187,7 +208,7 @@ function wireCall() {
     setTileState(id, state);
     if (state === "failed") report("peer-failed", { remote: id, ...diag });
   });
-  call.addEventListener("media", ({ detail: { id, mic, cam } }) => setTileMedia(id, { mic, cam }));
+  call.addEventListener("media", ({ detail: { id, ...media } }) => setTileMedia(id, media));
   call.addEventListener("chat", ({ detail: { id, text } }) => addMessage(text, { from: names.get(id) ?? "?" }));
   call.addEventListener("channels", ({ detail: { open } }) => setChatEnabled(open));
 }
@@ -196,18 +217,18 @@ async function start() {
   const name = await askName();
   setStatus("Starting camera…");
   localStream = await getMedia();
-  const media = { mic: localStream.getAudioTracks().length > 0, cam: localStream.getVideoTracks().length > 0 };
-  if (!media.cam) Object.assign($("cam"), { disabled: true, textContent: "No camera" });
-  if (!media.mic) Object.assign($("mic"), { disabled: true, textContent: "No mic" });
+  if (!localStream.getVideoTracks().length) Object.assign($("cam"), { disabled: true, textContent: "No camera" });
+  if (!localStream.getAudioTracks().length) Object.assign($("mic"), { disabled: true, textContent: "No mic" });
 
   addTile("self", name).querySelector("video").srcObject = localStream;
-  setTileMedia("self", media);
 
   // ICE servers (including TURN) arrive with the room's welcome.
   call = new MeshCall({ forceRelay, sendSignal: (msg) => signaling.send(msg) });
   call.start(localStream);
-  call.setMediaState(media);
+  sendMediaState();
   wireCall();
+  // Phone browsers can't share a screen.
+  $("share").hidden = !navigator.mediaDevices?.getDisplayMedia;
 
   signaling = openSignaling(roomId, {
     onOpen: () => {
@@ -251,15 +272,53 @@ function toggle(button, kind, onLabel, offLabel) {
   tracks.forEach((t) => (t.enabled = enabled));
   button.textContent = enabled ? onLabel : offLabel;
   button.classList.toggle("off", !enabled);
-  const media = {
-    mic: localStream?.getAudioTracks()[0]?.enabled ?? false,
-    cam: localStream?.getVideoTracks()[0]?.enabled ?? false,
-  };
-  setTileMedia("self", media);
-  call?.setMediaState(media);
+  sendMediaState();
+}
+
+// Sharing swaps the screen in for the camera on every connection.
+async function startSharing() {
+  const button = $("share");
+  button.disabled = true;
+  let display;
+  try {
+    display = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 15, max: 15 } }, audio: false });
+  } catch (err) {
+    if (err.name !== "NotAllowedError") console.warn("getDisplayMedia", err.name); // NotAllowedError: they cancelled
+    return;
+  } finally {
+    button.disabled = false;
+  }
+  const track = display.getVideoTracks()[0];
+  if (ended || !track) return display.getTracks().forEach((t) => t.stop());
+  screen = display;
+  track.contentHint = "detail"; // sharp text over smooth motion
+  track.onended = stopSharing; // the browser's own "Stop sharing"
+  call.setVideoTrack(track);
+  tiles.get("self").querySelector("video").srcObject = display;
+  button.textContent = "Stop sharing";
+  button.classList.add("primary");
+  $("cam").disabled = true;
+  sendMediaState();
+}
+
+function stopSharing() {
+  if (!screen) return;
+  screen.getTracks().forEach((t) => {
+    t.onended = null;
+    t.stop();
+  });
+  screen = null;
+  const camera = localStream.getVideoTracks()[0] ?? null;
+  call.setVideoTrack(camera);
+  tiles.get("self").querySelector("video").srcObject = localStream;
+  $("share").textContent = "Share screen";
+  $("share").classList.remove("primary");
+  $("cam").disabled = !camera;
+  sendMediaState();
 }
 $("mic").onclick = (e) => toggle(e.currentTarget, "audio", "Mic on", "Mic off");
 $("cam").onclick = (e) => toggle(e.currentTarget, "video", "Cam on", "Cam off");
+$("share").onclick = () => (screen ? stopSharing() : startSharing());
 $("copy").onclick = async (e) => {
   const button = e.currentTarget; // gone once we await
   try {
@@ -273,7 +332,7 @@ $("copy").onclick = async (e) => {
 $("leave").onclick = async () => {
   ended = true;
   call?.leave();
-  localStream?.getTracks().forEach((t) => t.stop());
+  stopTracks();
   await signaling?.close(me ?? undefined); // says goodbye even mid-reconnect
   location.href = "/chat";
 };
