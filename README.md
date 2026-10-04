@@ -45,14 +45,19 @@ Browser reports go to `POST /chat/report`. It accepts same-origin requests only,
 
 ## Development
 
+Needs Node.js 24 or later (CI runs 24; see `.nvmrc`). Wrangler and the Workers runtime come from `devDependencies`.
+
 ```bash
 npm install
 npm run dev         # wrangler dev on http://localhost:8787
 npm test            # syntax-checks public/chat, runs the Worker tests (Workers runtime) and the browser-module tests (Node, against fakes in test/client)
 npm run typecheck
+npm run coverage    # the tests with coverage
 ```
 
-Local sign-in: the `.poietic.tech` cookie can't reach localhost, so create a gitignored `.dev.vars` containing `DEV_AUTH_BYPASS=1`. The bypass only works when the hostname is `localhost` or `127.0.0.1`, so it can't open up production even if the variable were set there.
+[TESTING.md](TESTING.md) says what the tests cover and records the current coverage. [docs/configuration.md](docs/configuration.md) lists every secret, variable and binding.
+
+Local sign-in: the `.poietic.tech` cookie can't reach localhost, so copy [.dev.vars.example](.dev.vars.example) to a gitignored `.dev.vars`, which sets `DEV_AUTH_BYPASS=1`. The bypass only works when the hostname is `localhost` or `127.0.0.1`, so it can't open up production even if the variable were set there.
 
 Local TURN (optional): add `CF_TURN_KEY_ID` and `CF_TURN_KEY_API_TOKEN` to `.dev.vars`. They're in Infisical (project in [.infisical.json](.infisical.json), env `dev`). Without them it uses STUN only, which is fine on one machine. Add `?relay=1` to a room URL to force media through TURN.
 
@@ -69,3 +74,7 @@ Repository secrets:
 | `CLOUDFLARE_API_TOKEN` | Cloudflare API token with Workers Scripts: Edit (account) |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account ID |
 | `CF_TURN_KEY_ID`, `CF_TURN_KEY_API_TOKEN` | Infisical, env `dev` |
+
+## License
+
+[MIT](LICENSE).

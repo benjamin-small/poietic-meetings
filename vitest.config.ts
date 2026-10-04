@@ -14,7 +14,11 @@ const privateJwk = { ...(await crypto.subtle.exportKey("jwk", pair.privateKey)),
 
 export default defineConfig({
   // Worker tests only; the browser modules' tests run in Node (vitest.client.config.ts).
-  test: { include: ["test/*.test.ts"] },
+  test: {
+    include: ["test/*.test.ts"],
+    // Istanbul, because the Workers pool can't collect V8 coverage.
+    coverage: { provider: "istanbul", include: ["src/**/*.ts"], reportsDirectory: "coverage/worker" },
+  },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
