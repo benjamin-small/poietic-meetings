@@ -2,13 +2,12 @@
 //
 //   GET  /chat/r/:uuid       room page (anyone with the link), 404 if unknown
 //   POST /chat/rooms         create a room (signed-in poietic users only)
-//   GET  /chat/config?room=  ICE servers incl. TURN, only for existing rooms
-//   GET  /chat/ws?room=      WebSocket to the room's Durable Object
+//   GET  /chat/ws?room=      WebSocket to the room's Durable Object (ICE/TURN
+//                            servers arrive in its welcome, so only members get them)
 //   POST /chat/report        client diagnostics (dropped sockets, failed peers) → Workers Logs
 //   everything else          static assets from public/
 
 import { authenticate } from "./auth";
-import { cloudflareTurn, STUN_ONLY, type IceServer } from "./turn";
 import type { Room } from "./room";
 
 export { Room } from "./room";
@@ -25,19 +24,6 @@ export interface Env {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const ROOM_PATH = /^\/chat\/r\/([^/]+)\/?$/;
-
-// Per-isolate, so credentials are shared across requests the isolate serves.
-let getIceServers: (() => Promise<IceServer[]>) | null = null;
-
-function iceServersFor(env: Env): Promise<IceServer[]> {
-  if (!env.CF_TURN_KEY_ID || !env.CF_TURN_KEY_API_TOKEN) return Promise.resolve(STUN_ONLY);
-  getIceServers ??= cloudflareTurn({
-    keyId: env.CF_TURN_KEY_ID,
-    apiToken: env.CF_TURN_KEY_API_TOKEN,
-    fallback: STUN_ONLY,
-  });
-  return getIceServers();
-}
 
 // What a browser may report, and nothing else. Values are clipped, so a
 // report can't smuggle arbitrary text into the logs.
@@ -140,11 +126,6 @@ export default {
 
     if (url.pathname === "/chat/report" && request.method === "POST") {
       return report(request);
-    }
-
-    if (url.pathname === "/chat/config") {
-      if (!(await roomExists(env, room))) return json({ error: "not-found" }, 404);
-      return json({ iceServers: await iceServersFor(env) });
     }
 
     if (url.pathname === "/chat/ws") {

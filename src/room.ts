@@ -4,18 +4,27 @@
 //
 // Protocol (JSON over the WebSocket):
 //   client → server  join {name, resume?: {id, token}}  first message after connecting
-//   server → client  welcome {id, token, resumed, peers:[{id,name}]}
+//   server → client  welcome {id, token, resumed, peers:[{id,name}], iceServers}
 //   server → others  peer-joined {id, name}             (not sent for a resume)
+//   server → others  peer-resumed {id}                  someone came back after a drop;
+//                                                        unfinished calls with them restart
 //   client → server  offer|answer|candidate {to, …}     relayed to `to` only,
 //   server → target  … plus {from}                      with `from` set by the server
 //   client → server  leave                              deliberate exit
+//   client → server  leave {resume: {id, token}}        same, from a socket that
+//                                                        never joined (leaving mid-reconnect)
 //   server → all     peer-left {id}
 //   server → client  full | not-found                   then the socket closes
 //   client → server  {"type":"ping"}  →  {"type":"pong"}  answered by the runtime
 //                                                        without waking this object
 //
-// The newcomer offers to everyone already present; existing peers only
-// answer, so two offers never cross.
+// ICE servers (including TURN credentials) are only handed out in welcome,
+// so only people in the room get them.
+//
+// The newcomer offers to everyone already present. Offers can still cross
+// (a resumed peer offering to someone who joined while it was away, or both
+// sides retrying a failed connection); the client settles that with
+// polite/impolite roles (public/chat/mesh.js).
 //
 // Connections drop without warning (mobile networks, Cloudflare restarting
 // servers, this object being reset). So people are tracked in storage, not
@@ -25,11 +34,14 @@
 // `leave` message, or close code 1000/1001) skips the grace period.
 
 import { DurableObject } from "cloudflare:workers";
+import { cloudflareTurn, STUN_ONLY, type IceServer } from "./turn";
 
 export const ROOM_TTL_MS = 24 * 60 * 60 * 1000; // delete after this long with nobody present
 export const MAX_PEERS = 6; // mesh: each person uploads to every other, so keep it small
+export const MAX_SOCKETS = MAX_PEERS * 2; // headroom for people whose old socket lingers
 export const GRACE_MS = 30_000; // how long a dropped person can come back silently
 export const STALE_MS = 60_000; // no ping for this long = dead connection (clients ping every 20s)
+export const JOIN_DEADLINE_MS = 10_000; // clients join right after connecting; idlers are closed
 export const SWEEP_MS = 15_000; // how often to check for the above while anyone is here
 const NAME_MAX = 32;
 const MESSAGE_MAX = 64 * 1024; // SDP with many candidates is a few KB
@@ -79,12 +91,29 @@ function log(event: string, fields: Record<string, unknown>): void {
 const randomId = (bytes: number) =>
   [...crypto.getRandomValues(new Uint8Array(bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
 
+interface TurnEnv {
+  CF_TURN_KEY_ID?: string;
+  CF_TURN_KEY_API_TOKEN?: string;
+}
+
 export class Room extends DurableObject {
+  private readonly turnEnv: TurnEnv;
+  // Per room, so credentials are shared only by people in this room.
+  private getIceServers: (() => Promise<IceServer[]>) | null = null;
+
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env as never);
+    this.turnEnv = env as TurnEnv;
     // Heartbeats are answered by the runtime itself, so they don't wake the
     // object; getWebSocketAutoResponseTimestamp tells us when each last pinged.
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
+  }
+
+  private iceServers(): Promise<IceServer[]> {
+    const { CF_TURN_KEY_ID, CF_TURN_KEY_API_TOKEN } = this.turnEnv;
+    if (!CF_TURN_KEY_ID || !CF_TURN_KEY_API_TOKEN) return Promise.resolve(STUN_ONLY);
+    this.getIceServers ??= cloudflareTurn({ keyId: CF_TURN_KEY_ID, apiToken: CF_TURN_KEY_API_TOKEN, fallback: STUN_ONLY });
+    return this.getIceServers();
   }
 
   async init(creator: string): Promise<void> {
@@ -113,9 +142,21 @@ export class Room extends DurableObject {
     };
 
     if (!(await this.exists())) return reject("not-found");
-    // Headroom for people reconnecting while their old socket lingers; the
-    // real cap is on people, checked at join.
-    if (this.openSockets().length >= MAX_PEERS * 2) return reject("full");
+    // The real cap is on people, checked at join. This one only bounds
+    // sockets: at the limit, make room by closing the longest-waiting socket
+    // that never joined, so idle sockets can't lock anyone out (including
+    // members coming back to resume).
+    const open = this.openSockets();
+    if (open.length >= MAX_SOCKETS) {
+      const idle = open
+        .filter((ws) => !attachmentOf(ws).id)
+        .sort((a, b) => attachmentOf(a).connectedAt - attachmentOf(b).connectedAt)[0];
+      if (!idle) return reject("full");
+      log("evict", { room, conn: attachmentOf(idle).conn });
+      try {
+        idle.close(4003, "evicted");
+      } catch {}
+    }
 
     this.ctx.acceptWebSocket(server);
     const attachment: Attachment = { conn: randomId(6), room, connectedAt: Date.now() };
@@ -136,6 +177,7 @@ export class Room extends DurableObject {
     const att = attachmentOf(ws);
 
     if (msg.type === "join") return this.join(ws, att, msg);
+    if (msg.type === "leave" && !att.id) return this.farewell(ws, att, msg);
     if (!att.id) return;
     const me = await this.person(att.id);
     if (!me || me.conn !== att.conn) return; // superseded by a newer connection
@@ -171,10 +213,21 @@ export class Room extends DurableObject {
 
   async alarm(): Promise<void> {
     const now = Date.now();
+    // Read before the sweep: letting the last person go below re-arms the
+    // 24h TTL (marker "expire"), and that must not count as the TTL running out.
+    const expiring = (await this.ctx.storage.get<string>("alarm")) === "expire";
 
-    // Sockets that stopped pinging are dead even if nobody told us.
+    // Sockets that stopped pinging are dead even if nobody told us, and
+    // sockets that never joined have no business staying open.
     for (const ws of this.openSockets()) {
       const att = attachmentOf(ws);
+      if (!att.id && now - att.connectedAt > JOIN_DEADLINE_MS) {
+        log("unjoined", { room: att.room, conn: att.conn });
+        try {
+          ws.close(4003, "join timeout");
+        } catch {}
+        continue;
+      }
       const lastSeen = Math.max(att.connectedAt, this.ctx.getWebSocketAutoResponseTimestamp(ws)?.getTime() ?? 0);
       if (now - lastSeen > STALE_MS) {
         log("stale", { room: att.room, peer: att.id, conn: att.conn, silentMs: now - lastSeen });
@@ -201,7 +254,7 @@ export class Room extends DurableObject {
     }
 
     const empty = (await this.people()).length === 0 && this.openSockets().length === 0;
-    if (empty && (await this.ctx.storage.get<string>("alarm")) === "expire") {
+    if (empty && expiring) {
       log("expire", {});
       await this.ctx.storage.deleteAll();
       return;
@@ -226,9 +279,17 @@ export class Room extends DurableObject {
           old.close(4002, "replaced");
         } catch {}
       }
+      // Signaling to or from them may have been lost while they were away.
+      for (const p of people) {
+        const s = p.id === claimed.id ? undefined : this.socketFor(p);
+        if (s) send(s, { type: "peer-resumed", id: claimed.id });
+      }
       log("join", { room: att.room, peer: claimed.id, resumed: true, people: people.length });
-      send(ws, { type: "welcome", id: claimed.id, token: claimed.token, resumed: true, peers: others(people, claimed.id) });
       await this.schedule();
+      // Fetched last: it may go out to the network, and everything above is
+      // already saved, so another event interleaving here sees a consistent room.
+      const iceServers = await this.iceServers();
+      send(ws, { type: "welcome", id: claimed.id, token: claimed.token, resumed: true, peers: others(people, claimed.id), iceServers });
       return;
     }
 
@@ -243,12 +304,23 @@ export class Room extends DurableObject {
     att.id = me.id;
     ws.serializeAttachment(att);
     log("join", { room: att.room, peer: me.id, resumed: false, people: people.length + 1 });
-    send(ws, { type: "welcome", id: me.id, token: me.token, resumed: false, peers: others(people, me.id) });
     for (const p of people) {
       const s = this.socketFor(p);
       if (s) send(s, { type: "peer-joined", id: me.id, name: me.name });
     }
     await this.schedule();
+    const iceServers = await this.iceServers(); // last, as above
+    send(ws, { type: "welcome", id: me.id, token: me.token, resumed: false, peers: others(people, me.id), iceServers });
+  }
+
+  /** A `leave` from a socket that never joined: a browser leaving while its connection was down. */
+  private async farewell(ws: WebSocket, att: Attachment, msg: { resume?: { id?: unknown; token?: unknown } }) {
+    const p = (await this.people()).find((p) => p.id === msg.resume?.id && p.token === msg.resume?.token);
+    if (p) {
+      log("leave", { room: att.room, peer: p.id, how: "farewell" });
+      await this.remove(p);
+    }
+    ws.close(1000, "left");
   }
 
   /** A socket went away. Deliberate → leave now; otherwise start the grace period. */
@@ -283,7 +355,17 @@ export class Room extends DurableObject {
   private async schedule() {
     const busy = (await this.people()).length > 0 || this.openSockets().length > 0;
     await this.ctx.storage.put("alarm", busy ? "sweep" : "expire");
-    await this.ctx.storage.setAlarm(Date.now() + (busy ? SWEEP_MS : ROOM_TTL_MS));
+    if (!busy) {
+      await this.ctx.storage.setAlarm(Date.now() + ROOM_TTL_MS);
+      return;
+    }
+    // Only ever move a pending sweep earlier. Re-arming it on every event
+    // would let a steady stream of events postpone it forever.
+    const now = Date.now();
+    const pending = await this.ctx.storage.getAlarm();
+    if (pending === null || pending <= now || pending > now + SWEEP_MS) {
+      await this.ctx.storage.setAlarm(now + SWEEP_MS);
+    }
   }
 
   private async people(): Promise<Person[]> {

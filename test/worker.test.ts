@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { exports, env } from "cloudflare:workers";
 import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { forbidOutboundFetch, mintToken } from "./helpers";
-import { GRACE_MS, MAX_PEERS, STALE_MS, cleanName, type Room } from "../src/room";
+import { GRACE_MS, JOIN_DEADLINE_MS, MAX_PEERS, MAX_SOCKETS, STALE_MS, cleanName, type Room } from "../src/room";
 
 const ORIGIN = "https://tinkers.poietic.tech";
 
@@ -31,6 +31,7 @@ async function connect(room: string) {
   const ws = res.webSocket!;
   expect(ws).toBeTruthy();
   const messages: Msg[] = [];
+  const closed = new Promise<number>((r) => ws.addEventListener("close", (e: CloseEvent) => r(e.code)));
   ws.accept();
   ws.addEventListener("message", (e: MessageEvent) => {
     messages.push(JSON.parse(e.data as string));
@@ -45,7 +46,7 @@ async function connect(room: string) {
       { timeout: 2000 },
     );
   const sendJson = (msg: object) => ws.send(JSON.stringify(msg));
-  return { ws, messages, waitFor, send: sendJson };
+  return { ws, messages, waitFor, send: sendJson, closed };
 }
 
 type Welcome = Msg & { id: string; token: string; resumed: boolean; peers: { id: string; name: string }[] };
@@ -55,8 +56,7 @@ async function join(room: string, name = "Guest", resume?: { id: string; token: 
   const peer = await connect(room);
   peer.send({ type: "join", name, resume });
   const welcome = (await peer.waitFor("welcome")) as Welcome;
-  const closed = new Promise<number>((r) => peer.ws.addEventListener("close", (e: CloseEvent) => r(e.code)));
-  return { ...peer, id: welcome.id, token: welcome.token, welcome, closed };
+  return { ...peer, id: welcome.id, token: welcome.token, welcome };
 }
 
 const roomStub = (id: string) => env.ROOMS.get(env.ROOMS.idFromName(id));
@@ -123,10 +123,11 @@ describe("creating a room", () => {
     expect(res.status).toBe(401);
   });
 
-  it("rejects a tampered token", async () => {
-    const token = await mintToken();
-    const [h, , s] = token.split(".");
-    const forged = btoa(JSON.stringify({ sub: "admin", aud: "poietic:public" })).replace(/=+$/, "");
+  it("rejects a tampered token whose claims are otherwise valid", async () => {
+    // Every claim checks out (issuer, audience, times); only the signature
+    // doesn't match, so this fails solely if signatures are verified.
+    const [h, , s] = (await mintToken()).split(".");
+    const [, forged] = (await mintToken({ sub: "admin" })).split(".");
     const res = await createRoom(`__Secure-poietic-session=${h}.${forged}.${s}`);
     expect(res.status).toBe(401);
   });
@@ -154,14 +155,11 @@ describe("room lookups", () => {
     expect(await res.text()).toContain("Room not found");
   });
 
-  it("only hands out ICE config for existing rooms", async () => {
-    expect((await call(`/chat/config?room=${unknown}`)).status).toBe(404);
-    expect((await call(`/chat/config?room=not-a-uuid`)).status).toBe(404);
+  it("hands out ICE servers only to people who join, not over HTTP", async () => {
     const id = await newRoomId();
-    const res = await call(`/chat/config?room=${id}`);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("cache-control")).toBe("no-store");
-    const { iceServers } = (await res.json()) as { iceServers: { urls: string }[] };
+    expect((await call(`/chat/config?room=${id}`)).status).toBe(404);
+    const a = await join(id, "A");
+    const iceServers = a.welcome.iceServers as { urls: string }[];
     expect(iceServers[0]!.urls).toContain("stun:");
   });
 
@@ -293,6 +291,33 @@ describe("expiry", () => {
     expect((await call(`/chat/r/${id}`)).status).toBe(200);
   });
 
+  it("keeps the room for its TTL when the last person drops without saying goodbye", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    a.ws.close(4000, "network lost"); // not a deliberate leave
+    await vi.waitFor(async () => ageGrace(id, a.id));
+    await runDurableObjectAlarm(stubFor(id)); // the sweep that lets A go
+    expect((await call(`/chat/r/${id}`)).status).toBe(200);
+    const alarm = await runInDurableObject(stubFor(id), (_i: Room, state) => state.storage.getAlarm());
+    expect(alarm! - Date.now()).toBeGreaterThan(23 * 60 * 60 * 1000);
+    // Only the TTL alarm itself deletes it.
+    await runDurableObjectAlarm(stubFor(id));
+    expect((await call(`/chat/r/${id}`)).status).toBe(404);
+  });
+
+  it("doesn't let a stream of events postpone the sweep", async () => {
+    const id = await newRoomId();
+    await join(id, "A");
+    const first = await runInDurableObject(stubFor(id), (_i: Room, state) => state.storage.getAlarm());
+    for (let i = 0; i < 3; i++) {
+      const lurker = await connect(id);
+      lurker.ws.close(4000, "churn");
+      await settle();
+    }
+    const later = await runInDurableObject(stubFor(id), (_i: Room, state) => state.storage.getAlarm());
+    expect(later).toBe(first);
+  });
+
   it("re-arms the alarm once everyone has left", async () => {
     const id = await newRoomId();
     const a = await join(id);
@@ -301,6 +326,45 @@ describe("expiry", () => {
       await runDurableObjectAlarm(stubFor(id));
       expect((await call(`/chat/r/${id}`)).status).toBe(404);
     });
+  });
+});
+
+describe("idle sockets", () => {
+  it("makes room for a real visitor by evicting a socket that never joined", async () => {
+    const id = await newRoomId();
+    await join(id, "A");
+    const lurkers = [];
+    for (let i = 1; i < MAX_SOCKETS; i++) lurkers.push(await connect(id));
+    const b = await join(id, "B");
+    expect(b.welcome.peers.map((p) => p.name)).toEqual(["A"]);
+    expect(await lurkers[0]!.closed).toBe(4003); // the longest-waiting one made way
+  });
+
+  it("lets a member resume even when the room is full of idle sockets", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    await join(id, "B");
+    a.ws.close(4000, "blip");
+    await settle();
+    for (let i = 1; i < MAX_SOCKETS; i++) await connect(id); // B + 11 idle sockets
+    const a2 = await join(id, "A", { id: a.id, token: a.token });
+    expect(a2.welcome).toMatchObject({ id: a.id, resumed: true });
+  });
+
+  it("closes sockets that never join, even if they keep pinging", async () => {
+    const id = await newRoomId();
+    await join(id, "A");
+    const lurker = await connect(id);
+    lurker.ws.send('{"type":"ping"}');
+    await settle();
+    await runInDurableObject(roomStub(id), (_i: Room, state) => {
+      for (const ws of state.getWebSockets()) {
+        const att = ws.deserializeAttachment() as { id?: string; connectedAt: number };
+        if (!att.id) ws.serializeAttachment({ ...att, connectedAt: Date.now() - JOIN_DEADLINE_MS - 1000 });
+      }
+    });
+    await runDurableObjectAlarm(roomStub(id));
+    expect(await lurker.closed).toBe(4003);
   });
 });
 
@@ -346,10 +410,12 @@ describe("reconnecting", () => {
     // Signaling now reaches the new connection.
     b.send({ type: "offer", to: a.id, sdp: {} });
     expect(await a2.waitFor("offer")).toMatchObject({ from: b.id });
-    // B never saw A leave or rejoin, even after a sweep.
+    // B never saw A leave or rejoin, even after a sweep; it's only told A is
+    // back, so any unfinished call with A can restart.
     await runDurableObjectAlarm(roomStub(id));
     await settle();
-    expect(b.messages.map((m) => m.type)).toEqual(["welcome"]);
+    expect(b.messages.map((m) => m.type)).toEqual(["welcome", "peer-resumed"]);
+    expect(b.messages[1]).toMatchObject({ id: a.id });
   });
 
   it("treats a wrong token as a new person", async () => {
@@ -388,6 +454,28 @@ describe("reconnecting", () => {
     // Without a reply, clients only give up after ~10s and report 1006.
     expect(Date.now() - started).toBeLessThan(2000);
     expect(result.code).toBe(4000);
+  });
+
+  it("lets someone leave from a fresh socket while their connection was down", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const b = await join(id, "B");
+    a.ws.close(4000, "drop"); // A is in their grace period now
+    const bye = await connect(id);
+    bye.send({ type: "leave", resume: { id: a.id, token: a.token } });
+    expect(await b.waitFor("peer-left")).toMatchObject({ id: a.id });
+    expect(await bye.closed).toBe(1000);
+  });
+
+  it("ignores a farewell with the wrong token", async () => {
+    const id = await newRoomId();
+    const a = await join(id, "A");
+    const b = await join(id, "B");
+    const bye = await connect(id);
+    bye.send({ type: "leave", resume: { id: a.id, token: "nope" } });
+    expect(await bye.closed).toBe(1000);
+    await settle();
+    expect(b.messages.some((m) => m.type === "peer-left")).toBe(false);
   });
 
   it("a deliberate leave skips the grace period", async () => {

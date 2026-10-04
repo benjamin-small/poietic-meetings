@@ -27,7 +27,7 @@ describe("cloudflareTurn", () => {
     expect(url).toBe("https://rtc.live.cloudflare.com/v1/turn/keys/KEY/credentials/generate-ice-servers");
     expect(init?.method).toBe("POST");
     expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer TOKEN");
-    expect(JSON.parse(init?.body as string)).toEqual({ ttl: 86400 });
+    expect(JSON.parse(init?.body as string)).toEqual({ ttl: 6 * 60 * 60 });
   });
 
   it("strips port 53 URLs, keeps the rest", async () => {

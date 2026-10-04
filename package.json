@@ -2,11 +2,12 @@
   "name": "web-rtc-tinker",
   "version": "1.0.0",
   "scripts": {
-    "test": "vitest run",
+    "test": "npm run check:client && vitest run && vitest run --config vitest.client.config.ts",
     "dev": "wrangler dev",
     "typecheck": "tsc",
     "deploy": "wrangler deploy",
-    "types": "wrangler types --include-runtime=false"
+    "types": "wrangler types --include-runtime=false",
+    "check:client": "for f in public/chat/*.js; do node --check \"$f\" || exit 1; done"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.22.0",

@@ -13,6 +13,8 @@ const publicJwk = { ...(await crypto.subtle.exportKey("jwk", pair.publicKey)), k
 const privateJwk = { ...(await crypto.subtle.exportKey("jwk", pair.privateKey)), kid: KID };
 
 export default defineConfig({
+  // Worker tests only; the browser modules' tests run in Node (vitest.client.config.ts).
+  test: { include: ["test/*.test.ts"] },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
