@@ -6,13 +6,14 @@
 //   call.start(localStream);
 //   call.handleSignal(msg);           // every message from signaling.js
 //   call.sendChat(text) -> number     // peers it went to
-//   call.setMediaState({ mic, cam })  // tell peers our mute state
+//   call.setMediaState({ mic, cam, screen })  // tell peers our mute and sharing state
+//   call.setVideoTrack(track)         // send this as our video instead (a screen, or the camera back)
 //   call.leave();
 //
 // Events (CustomEvent, data in .detail):
 //   peer-joined {id, name}   peer-left {id}   stream {id, stream}
 //   state {id, state: "connecting"|"connected"|"failed", diag?}  diag only on failure
-//   chat {id, text}   media {id, mic, cam}   channels {open}
+//   chat {id, text}   media {id, mic, cam, screen}   channels {open}
 //
 // Connections that fail, or never come up because signaling was lost (e.g.
 // while our socket was down), are started over with a fresh offer. If both
@@ -20,6 +21,10 @@
 // the other ignores the crossing offer (WebRTC "perfect negotiation"). Each
 // offer carries an id its answer echoes, so a late answer to an offer we've
 // since replaced is ignored rather than applied to the new connection.
+//
+// Every connection has exactly one video slot we can send on, even without a
+// camera, so sharing a screen is a replaceTrack on that slot: no new offer,
+// which matters because any offer here starts a fresh connection.
 
 const CONNECT_TIMEOUT_MS = 15000; // ICE can sit in "connecting" forever instead of failing
 const MAX_RETRIES = 3; // fresh offers per peer before leaving it at "Couldn't connect"
@@ -28,12 +33,15 @@ const MAX_PENDING = 50; // candidates buffered before an offer; real connections
 const CHAT_PER_SECOND = 10; // per peer; more than that is dropped
 const UPLOAD_BUDGET_BPS = 1_500_000; // total video upload, shared across peers
 const MIN_VIDEO_BPS = 250_000;
+const SCREEN_UPLOAD_BUDGET_BPS = 2_500_000; // more while sharing a screen, so text stays legible
+const MIN_SCREEN_BPS = 500_000;
 const CHAT_MAX = 2000;
 
 export class MeshCall extends EventTarget {
   #peers = new Map(); // id -> { name, pc, channel, pending, timer, retries, failed, chatWindow, chatCount }
   #queue = Promise.resolve();
-  #media = { mic: true, cam: true };
+  #media = { mic: true, cam: true, screen: false };
+  #video = null; // what we send as video: the camera, a screen, or nothing
   #selfId = null;
 
   constructor({ iceServers = [], forceRelay, sendSignal }) {
@@ -44,6 +52,7 @@ export class MeshCall extends EventTarget {
 
   start(stream) {
     this.stream = stream;
+    this.#video = stream.getTracks().find((t) => t.kind === "video") ?? null;
   }
 
   get peerCount() {
@@ -67,6 +76,18 @@ export class MeshCall extends EventTarget {
   setMediaState(media) {
     this.#media = { ...this.#media, ...media };
     this.#broadcast({ t: "media", ...this.#media });
+    this.#applyBitrate();
+  }
+
+  /** Send `track` (or nothing, for null) as our video on every connection, now and later. */
+  setVideoTrack(track) {
+    return this.#enqueue(async () => {
+      this.#video = track;
+      for (const { pc } of this.#peers.values()) {
+        await this.#videoSlot(pc)?.sender.replaceTrack(track).catch(console.warn);
+      }
+      this.#applyBitrate();
+    }, "video");
   }
 
   leave() {
@@ -124,6 +145,7 @@ export class MeshCall extends EventTarget {
         }
         await peer.pc.setRemoteDescription(msg.sdp);
         await this.#flush(peer);
+        await this.#openVideoSlot(peer.pc);
         await peer.pc.setLocalDescription(await peer.pc.createAnswer());
         this.sendSignal({ type: "answer", to: msg.from, sdp: peer.pc.localDescription, nid: msg.nid });
         break;
@@ -156,6 +178,11 @@ export class MeshCall extends EventTarget {
   /** Offer a new connection. `silent` replaces an existing one without join/leave events. */
   async #offerTo(id, name, { silent = false } = {}) {
     const peer = this.#add(id, name, { silent, retries: this.#peers.get(id)?.retries ?? 0 });
+    // Without a mic we still want to hear them. Without a camera we still want
+    // to see them, and keep a slot to send a screen on later.
+    const kinds = peer.pc.getTransceivers().map((t) => t.receiver.track.kind);
+    if (!kinds.includes("audio")) peer.pc.addTransceiver("audio", { direction: "recvonly" });
+    if (!kinds.includes("video")) peer.pc.addTransceiver("video", { direction: "sendrecv", streams: [this.stream] });
     this.#setupChannel(id, peer.pc.createDataChannel("chat"));
     peer.nid = crypto.randomUUID();
     await peer.pc.setLocalDescription(await peer.pc.createOffer());
@@ -169,15 +196,19 @@ export class MeshCall extends EventTarget {
     const pc = new RTCPeerConnection(this.config);
     const peer = { name, pc, channel: null, pending: [], timer: 0, retries, failed: false, chatWindow: 0, chatCount: 0 };
     this.#peers.set(id, peer);
-    const tracks = this.stream.getTracks();
-    for (const track of tracks) pc.addTrack(track, this.stream);
-    // Still receive what we can't send (no camera or mic), so we see and hear others.
-    for (const kind of ["audio", "video"]) {
-      if (!tracks.some((t) => t.kind === kind)) pc.addTransceiver(kind, { direction: "recvonly" });
-    }
+    // When they offer, their offer reuses these; #offerTo and #openVideoSlot
+    // fill in whatever we don't have.
+    for (const track of this.stream.getTracks()) if (track.kind === "audio") pc.addTrack(track, this.stream);
+    if (this.#video) pc.addTrack(this.#video, this.stream);
 
     pc.onicecandidate = (e) => e.candidate && this.sendSignal({ type: "candidate", to: id, candidate: e.candidate });
-    pc.ontrack = (e) => this.#emit("stream", { id, stream: e.streams[0] });
+    pc.ontrack = (e) => {
+      // A track that comes without a stream (their video slot, where the
+      // browser can't set one) joins the stream their other track came in.
+      if (e.streams[0]) peer.remote = e.streams[0];
+      else (peer.remote ??= new MediaStream()).addTrack(e.track);
+      this.#emit("stream", { id, stream: peer.remote });
+    };
     pc.ondatachannel = (e) => this.#setupChannel(id, e.channel);
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "connected") {
@@ -198,6 +229,27 @@ export class MeshCall extends EventTarget {
     this.#emit("state", { id, state: "connecting" });
     this.#applyBitrate();
     return peer;
+  }
+
+  /** The one video transceiver we send on, once there is one. */
+  #videoSlot(pc) {
+    return pc
+      .getTransceivers()
+      .find((t) => t.receiver.track.kind === "video" && (t.direction === "sendrecv" || t.direction === "sendonly"));
+  }
+
+  /**
+   * Answering without a camera: the offer's video line made a recvonly
+   * transceiver. Make it able to send before we answer, so a screen can go
+   * out on it later without renegotiating.
+   */
+  async #openVideoSlot(pc) {
+    if (this.#videoSlot(pc)) return;
+    const slot = pc.getTransceivers().find((t) => t.mid !== null && t.receiver.track.kind === "video");
+    if (!slot) return;
+    slot.direction = "sendrecv";
+    slot.sender.setStreams?.(this.stream); // so their side files it with our audio
+    if (this.#video) await slot.sender.replaceTrack(this.#video);
   }
 
   /** Why a connection failed, without anything identifying: states and candidate kinds. */
@@ -273,7 +325,7 @@ export class MeshCall extends EventTarget {
         if (!this.#allowChat(id)) return;
         this.#emit("chat", { id, text: msg.text.slice(0, CHAT_MAX) });
       } else if (msg.t === "media") {
-        this.#emit("media", { id, mic: msg.mic !== false, cam: msg.cam !== false });
+        this.#emit("media", { id, mic: msg.mic !== false, cam: msg.cam !== false, screen: msg.screen === true });
       }
     };
   }
@@ -309,7 +361,8 @@ export class MeshCall extends EventTarget {
   // Mesh sends a separate video stream to every peer, so split the upload
   // budget between them.
   #applyBitrate() {
-    const bps = Math.max(MIN_VIDEO_BPS, Math.floor(UPLOAD_BUDGET_BPS / Math.max(1, this.#peers.size)));
+    const [budget, min] = this.#media.screen ? [SCREEN_UPLOAD_BUDGET_BPS, MIN_SCREEN_BPS] : [UPLOAD_BUDGET_BPS, MIN_VIDEO_BPS];
+    const bps = Math.max(min, Math.floor(budget / Math.max(1, this.#peers.size)));
     for (const { pc } of this.#peers.values()) {
       for (const sender of pc.getSenders()) {
         if (sender.track?.kind !== "video") continue;

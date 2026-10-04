@@ -36,6 +36,7 @@ vi.mock("/chat/mesh.js", () => ({
       this.chatReach = 1; // what sendChat returns: how many peers got it
       this.chats = [];
       this.leave = vi.fn();
+      this.videoTracks = [];
       fake.call = this;
     }
     start(stream) {
@@ -46,6 +47,9 @@ vi.mock("/chat/mesh.js", () => ({
     }
     setMediaState(media) {
       this.mediaStates.push(media);
+    }
+    setVideoTrack(track) {
+      this.videoTracks.push(track);
     }
     sendChat(text) {
       this.chats.push(text);
@@ -172,7 +176,7 @@ describe("joining", () => {
     expect($("cam").disabled).toBe(true);
     expect($("cam").textContent).toBe("No camera");
     expect($("mic").disabled).toBe(false);
-    expect(fake.call.mediaStates).toEqual([{ mic: true, cam: false }]);
+    expect(fake.call.mediaStates).toEqual([{ mic: true, cam: false, screen: false }]);
     expect(tileFor("self").classList.contains("cam-off")).toBe(true);
   });
 
@@ -310,12 +314,12 @@ describe("controls", () => {
     expect($("mic").textContent).toBe("Mic off");
     expect($("mic").classList.contains("off")).toBe(true);
     expect(tileFor("self").querySelector(".muted").hidden).toBe(false);
-    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: false, cam: true });
+    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: false, cam: true, screen: false });
 
     $("mic").click();
     expect(audio.enabled).toBe(true);
     expect($("mic").textContent).toBe("Mic on");
-    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: true, cam: true });
+    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: true, cam: true, screen: false });
   });
 
   it("turns the camera off and on", async () => {
@@ -324,7 +328,7 @@ describe("controls", () => {
     expect(fake.call.stream.getVideoTracks()[0].enabled).toBe(false);
     expect($("cam").textContent).toBe("Cam off");
     expect(tileFor("self").classList.contains("cam-off")).toBe(true);
-    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: true, cam: false });
+    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: true, cam: false, screen: false });
   });
 
   it("copies the room link without its query string", async () => {
@@ -427,5 +431,134 @@ describe("reconnecting", () => {
     expect(status()).toBe("Lost the connection to the room. Reload to rejoin.");
     expect(fake.call.leave).toHaveBeenCalled();
     expect(reports().at(-1)).toEqual(expect.objectContaining({ event: "gave-up", downMs: 120000, attempts: 12, code: 1006 }));
+  });
+});
+
+describe("sharing a screen", () => {
+  let display;
+
+  beforeEach(() => {
+    display = mediaStream("video");
+    navigator.mediaDevices.getDisplayMedia = vi.fn(async () => display);
+  });
+
+  const screenTrack = () => display.getVideoTracks()[0];
+  const camera = () => fake.call.stream.getVideoTracks()[0];
+  const self = () => tileFor("self");
+
+  it("offers sharing once you're in, where the browser can do it", async () => {
+    await openRoom({ join: false });
+    expect($("share").hidden).toBe(true);
+    $("name-input").value = "Ada";
+    $("join-form").requestSubmit();
+    await settle();
+    expect($("share").hidden).toBe(false);
+  });
+
+  it("doesn't offer it where the browser can't (phones)", async () => {
+    delete navigator.mediaDevices.getDisplayMedia;
+    await inRoom();
+    expect($("share").hidden).toBe(true);
+  });
+
+  it("sends your screen instead of your camera", async () => {
+    await inRoom([{ id: "b", name: "B" }]);
+    $("share").click();
+    await settle();
+    expect(navigator.mediaDevices.getDisplayMedia).toHaveBeenCalledWith({
+      video: { frameRate: { ideal: 15, max: 15 } },
+      audio: false,
+    });
+    expect(screenTrack().contentHint).toBe("detail");
+    expect(fake.call.videoTracks).toEqual([screenTrack()]);
+    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: true, cam: true, screen: true });
+    expect($("share").textContent).toBe("Stop sharing");
+    expect($("share").classList.contains("primary")).toBe(true);
+    expect($("cam").disabled).toBe(true);
+    expect(self().classList.contains("screen")).toBe(true);
+    expect(self().querySelector("video").srcObject).toBe(display);
+  });
+
+  it("goes back to the camera when you stop", async () => {
+    await inRoom();
+    $("share").click();
+    await settle();
+    $("share").click();
+    expect(screenTrack().stop).toHaveBeenCalled();
+    expect(fake.call.videoTracks).toEqual([screenTrack(), camera()]);
+    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: true, cam: true, screen: false });
+    expect($("share").textContent).toBe("Share screen");
+    expect($("cam").disabled).toBe(false);
+    expect(self().classList.contains("screen")).toBe(false);
+    expect(self().querySelector("video").srcObject).toBe(fake.call.stream);
+  });
+
+  it("stops when you use the browser's own Stop sharing", async () => {
+    await inRoom();
+    $("share").click();
+    await settle();
+    screenTrack().onended();
+    expect(fake.call.videoTracks.at(-1)).toBe(camera());
+    expect($("share").textContent).toBe("Share screen");
+  });
+
+  it("leaves the camera off afterwards if it was off before", async () => {
+    await inRoom();
+    $("cam").click();
+    $("share").click();
+    await settle();
+    $("share").click();
+    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: true, cam: false, screen: false });
+    expect(self().classList.contains("cam-off")).toBe(true);
+  });
+
+  it("works without a camera, and sends nothing after", async () => {
+    getUserMedia.mockRejectedValueOnce(new Error("no camera"));
+    getUserMedia.mockResolvedValueOnce(mediaStream("audio"));
+    await inRoom();
+    $("share").click();
+    await settle();
+    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: true, cam: true, screen: true });
+    expect(self().classList.contains("cam-off")).toBe(false);
+    $("share").click();
+    expect(fake.call.videoTracks).toEqual([screenTrack(), null]);
+    expect(fake.call.mediaStates.at(-1)).toEqual({ mic: true, cam: false, screen: false });
+    expect($("cam").disabled).toBe(true);
+    expect($("cam").textContent).toBe("No camera");
+  });
+
+  it("does nothing if you cancel the picker", async () => {
+    navigator.mediaDevices.getDisplayMedia.mockRejectedValue(Object.assign(new Error(), { name: "NotAllowedError" }));
+    await inRoom();
+    $("share").click();
+    await settle();
+    expect(fake.call.videoTracks).toEqual([]);
+    expect($("share").textContent).toBe("Share screen");
+    expect($("share").disabled).toBe(false);
+  });
+
+  it("stops sharing when you leave or the call ends", async () => {
+    await inRoom();
+    $("share").click();
+    await settle();
+    $("leave").click();
+    expect(screenTrack().stop).toHaveBeenCalled();
+
+    vi.resetModules();
+    loadHtml("room.html");
+    display = mediaStream("video");
+    await inRoom();
+    $("share").click();
+    await settle();
+    fake.signaling.onMessage({ type: "not-found" });
+    expect(screenTrack().stop).toHaveBeenCalled();
+  });
+
+  it("shows other people's shared screens whole", async () => {
+    await inRoom([{ id: "b", name: "B" }]);
+    fake.call.emit("media", { id: "b", mic: true, cam: true, screen: true });
+    expect(tileFor("b").classList.contains("screen")).toBe(true);
+    fake.call.emit("media", { id: "b", mic: true, cam: true, screen: false });
+    expect(tileFor("b").classList.contains("screen")).toBe(false);
   });
 });

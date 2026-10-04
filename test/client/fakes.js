@@ -95,18 +95,50 @@ export class FakePeerConnection {
     FakePeerConnection.all.push(this);
   }
 
-  addTrack(track) {
-    const sender = { track, getParameters: () => ({ encodings: [{}] }), setParameters: async () => {} };
-    this.senders.push(sender);
+  // Transceivers follow the browser's rules closely enough for the
+  // screen-share tests: an incoming offer reuses a transceiver made by
+  // addTrack, but not one made by addTransceiver, and makes a recvonly one
+  // for any media it can't match.
+  #transceiver(kind, { direction = "sendrecv", track = null, fromAddTrack = false } = {}) {
+    const sender = {
+      track,
+      streams: [],
+      replaceTrack: async (t) => void (sender.track = t),
+      setStreams: (...streams) => void (sender.streams = streams),
+      getParameters: () => ({ encodings: [{}] }),
+      setParameters: async (params) => void (sender.lastParams = params),
+    };
+    const transceiver = { mid: null, direction, sender, receiver: { track: { kind } }, fromAddTrack };
+    this.transceivers.push(transceiver);
+    return transceiver;
+  }
+
+  addTrack(track, ...streams) {
+    const { sender } = this.#transceiver(track.kind, { track, fromAddTrack: true });
+    sender.streams = streams;
     return sender;
   }
 
-  addTransceiver(kind, init) {
-    this.transceivers.push({ kind, ...init });
+  addTransceiver(kind, { direction, streams = [] } = {}) {
+    const t = this.#transceiver(kind, { direction });
+    t.sender.streams = streams;
+    return t;
+  }
+
+  getTransceivers() {
+    return this.transceivers;
   }
 
   getSenders() {
-    return this.senders;
+    return this.transceivers.map((t) => t.sender);
+  }
+
+  /** What an offer from this connection would carry, one entry per m-line. */
+  #media() {
+    return this.transceivers.map((t, i) => {
+      t.mid ??= String(i);
+      return { kind: t.receiver.track.kind, direction: t.direction };
+    });
   }
 
   createDataChannel(label) {
@@ -116,7 +148,7 @@ export class FakePeerConnection {
   }
 
   async createOffer() {
-    return { type: "offer", sdp: `offer-from-pc${this.n}` };
+    return { type: "offer", sdp: `offer-from-pc${this.n}`, media: this.#media() };
   }
 
   async createAnswer() {
@@ -139,6 +171,11 @@ export class FakePeerConnection {
     if (desc.type === "offer") {
       if (this.signalingState !== "stable") throw new Error(`InvalidStateError: remote offer in ${this.signalingState}`);
       this.signalingState = "have-remote-offer";
+      // Hand-written offers in tests default to one audio and one video line.
+      for (const [i, { kind }] of (desc.media ?? [{ kind: "audio" }, { kind: "video" }]).entries()) {
+        const reuse = this.transceivers.find((t) => t.mid === null && t.fromAddTrack && t.receiver.track.kind === kind);
+        (reuse ?? this.#transceiver(kind, { direction: "recvonly" })).mid = String(i);
+      }
     } else {
       if (this.signalingState !== "have-local-offer") throw new Error(`InvalidStateError: remote answer in ${this.signalingState}`);
       this.signalingState = "stable";
@@ -167,4 +204,7 @@ export class FakePeerConnection {
   }
 }
 
-export const stream = (...kinds) => ({ getTracks: () => kinds.map((kind) => ({ kind })) });
+export const stream = (...kinds) => {
+  const tracks = kinds.map((kind) => ({ kind }));
+  return { getTracks: () => tracks };
+};
