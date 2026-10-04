@@ -50,7 +50,7 @@ Needs Node.js 24 or later (CI runs 24; see `.nvmrc`). Wrangler and the Workers r
 ```bash
 npm install
 npm run dev         # wrangler dev on http://localhost:8787
-npm test            # syntax-checks public/chat, runs the Worker tests (Workers runtime) and the browser-module tests (Node, against fakes in test/client)
+npm test            # syntax-checks public/chat, runs the Worker tests (Workers runtime) and the browser tests (Node and happy-dom, against fakes in test/client)
 npm run typecheck
 npm run coverage    # the tests with coverage
 ```
