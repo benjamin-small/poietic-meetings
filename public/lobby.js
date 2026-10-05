@@ -24,7 +24,7 @@ async function whoAmI() {
 }
 
 async function createRoom(retry = true) {
-  const res = await fetch("/chat/rooms", { method: "POST" });
+  const res = await fetch("/rooms", { method: "POST" });
   if (res.status === 401 && retry) {
     const me = await whoAmI();
     if (me.authenticated) return createRoom(false);

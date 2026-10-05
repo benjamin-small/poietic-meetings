@@ -3,18 +3,33 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Tinkers</title>
-  <meta name="description" content="Small experiments from poietic.tech." />
+  <title>Meetings</title>
+  <meta name="description" content="Group video chat over WebRTC, up to 6 people." />
   <link rel="stylesheet" href="/site.css" />
 </head>
 <body>
   <main>
-    <h1>Tinkers</h1>
-    <p class="lede">Small experiments from <a href="https://poietic.tech/" style="color: inherit">poietic.tech</a>.</p>
-    <a class="card" href="/chat">
-      <h2>Chat</h2>
-      <p>Video chat for up to 6 people over WebRTC. Share a link, talk peer to peer.</p>
-    </a>
+    <h1>Meetings</h1>
+    <p class="lede">
+      Video chat for up to 6 people. Video, audio and messages go straight between browsers.
+      Anyone with a room link can join; creating one needs a poietic.tech sign-in.
+    </p>
+
+    <div id="loading" class="small">Checking sign-in…</div>
+
+    <div id="signed-out" class="actions" hidden>
+      <a class="button primary" data-provider="google">Sign in with Google</a>
+      <a class="button" data-provider="github">Sign in with GitHub</a>
+    </div>
+
+    <div id="signed-in" class="actions" hidden>
+      <button id="create" class="button primary">Create a room</button>
+      <p class="small">Signed in as <span id="who"></span> · <a id="signout">Sign out</a></p>
+    </div>
+
+    <p id="error" class="error" role="alert"></p>
+    <p class="small"><a href="https://poietic.tech/">poietic.tech</a></p>
   </main>
+  <script src="/lobby.js" type="module"></script>
 </body>
 </html>

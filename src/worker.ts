@@ -1,11 +1,11 @@
-// tinkers.poietic.tech: a hub for small experiments. Chat lives under /chat.
+// meetings.poietic.tech: group video chat over WebRTC, up to 6 people.
 //
-//   GET  /chat/r/:uuid       room page (anyone with the link), 404 if unknown
-//   POST /chat/rooms         create a room (signed-in poietic users only)
-//   GET  /chat/ws?room=      WebSocket to the room's Durable Object (ICE/TURN
+//   GET  /r/:uuid            room page (anyone with the link), 404 if unknown
+//   POST /rooms              create a room (signed-in poietic users only)
+//   GET  /ws?room=           WebSocket to the room's Durable Object (ICE/TURN
 //                            servers arrive in its welcome, so only members get them)
-//   POST /chat/report        client diagnostics (dropped sockets, failed peers) → Workers Logs
-//   everything else          static assets from public/
+//   POST /report             client diagnostics (dropped sockets, failed peers) → Workers Logs
+//   everything else          static assets from public/ (the lobby is / itself)
 
 import { authenticate } from "./auth";
 import type { Room } from "./room";
@@ -23,7 +23,7 @@ export interface Env {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const ROOM_PATH = /^\/chat\/r\/([^/]+)\/?$/;
+const ROOM_PATH = /^\/r\/([^/]+)\/?$/;
 
 // What a browser may report, and nothing else. Values are clipped, so a
 // report can't smuggle arbitrary text into the logs.
@@ -104,13 +104,13 @@ async function createRoom(request: Request, env: Env): Promise<Response> {
 
   const id = crypto.randomUUID();
   await roomStub(env, id).init(caller.sub);
-  return json({ id, url: `/chat/r/${id}` }, 201);
+  return json({ id, url: `/r/${id}` }, 201);
 }
 
 async function roomPage(request: Request, env: Env, id: string): Promise<Response> {
-  const page = new URL("/chat/room", request.url);
+  const page = new URL("/room", request.url);
   if (await roomExists(env, id)) return env.ASSETS.fetch(new Request(page, request));
-  const missing = new URL("/chat/missing", request.url);
+  const missing = new URL("/missing", request.url);
   const res = await env.ASSETS.fetch(new Request(missing, request));
   return new Response(res.body, { status: 404, headers: res.headers });
 }
@@ -120,15 +120,15 @@ export default {
     const url = new URL(request.url);
     const room = url.searchParams.get("room");
 
-    if (url.pathname === "/chat/rooms" && request.method === "POST") {
+    if (url.pathname === "/rooms" && request.method === "POST") {
       return createRoom(request, env);
     }
 
-    if (url.pathname === "/chat/report" && request.method === "POST") {
+    if (url.pathname === "/report" && request.method === "POST") {
       return report(request);
     }
 
-    if (url.pathname === "/chat/ws") {
+    if (url.pathname === "/ws") {
       if (!room || !UUID.test(room)) return new Response("Bad room", { status: 400 });
       return roomStub(env, room).fetch(request);
     }

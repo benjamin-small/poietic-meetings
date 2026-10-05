@@ -24,7 +24,7 @@
 // The newcomer offers to everyone already present. Offers can still cross
 // (a resumed peer offering to someone who joined while it was away, or both
 // sides retrying a failed connection); the client settles that with
-// polite/impolite roles (public/chat/mesh.js).
+// polite/impolite roles (public/mesh.js).
 //
 // Connections drop without warning (mobile networks, Cloudflare restarting
 // servers, this object being reset). So people are tracked in storage, not

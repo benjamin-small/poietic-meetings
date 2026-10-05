@@ -4,7 +4,7 @@ import { abortAllDurableObjects, runDurableObjectAlarm, runInDurableObject } fro
 import { forbidOutboundFetch, mintToken } from "./helpers";
 import { GRACE_MS, JOIN_DEADLINE_MS, MAX_PEERS, MAX_SOCKETS, STALE_MS, cleanName, type Room } from "../src/room";
 
-const ORIGIN = "https://tinkers.poietic.tech";
+const ORIGIN = "https://meetings.poietic.tech";
 
 const call = (path: string, init?: RequestInit, origin = ORIGIN) =>
   exports.default.fetch(new Request(`${origin}${path}`, init));
@@ -12,7 +12,7 @@ const call = (path: string, init?: RequestInit, origin = ORIGIN) =>
 async function createRoom(cookie: string | null = null, origin = ORIGIN) {
   const headers: Record<string, string> = { origin };
   if (cookie !== null) headers.cookie = cookie;
-  return call("/chat/rooms", { method: "POST", headers }, origin);
+  return call("/rooms", { method: "POST", headers }, origin);
 }
 
 const sessionCookie = async (overrides = {}) => `__Secure-poietic-session=${await mintToken(overrides)}`;
@@ -27,7 +27,7 @@ type Msg = { type: string; [k: string]: unknown };
 
 /** Open a socket to a room; collects every message the server sends. */
 async function connect(room: string) {
-  const res = await call(`/chat/ws?room=${room}`, { headers: { upgrade: "websocket" } });
+  const res = await call(`/ws?room=${room}`, { headers: { upgrade: "websocket" } });
   const ws = res.webSocket!;
   expect(ws).toBeTruthy();
   const messages: Msg[] = [];
@@ -89,11 +89,11 @@ describe("creating a room", () => {
     expect(res.status).toBe(201);
     const { id, url } = (await res.json()) as { id: string; url: string };
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(url).toBe(`/chat/r/${id}`);
+    expect(url).toBe(`/r/${id}`);
   });
 
   it("rejects cross-site requests even with a valid cookie", async () => {
-    const res = await call("/chat/rooms", {
+    const res = await call("/rooms", {
       method: "POST",
       headers: { origin: "https://evil.example", cookie: await sessionCookie() },
     });
@@ -139,25 +139,44 @@ describe("creating a room", () => {
   });
 });
 
+describe("static pages", () => {
+  // The root-relative URLs a page loads or links to.
+  const linksIn = (html: string) => [...html.matchAll(/(?:src|href)="(\/[^"]*)"/g)].map((m) => m[1]!);
+
+  it("serves the lobby at /", async () => {
+    const res = await call("/");
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain("<title>Meetings</title>");
+  });
+
+  it("serves everything the pages load or link to", async () => {
+    for (const page of ["/", "/room", "/missing"]) {
+      const links = linksIn(await (await call(page)).text());
+      expect(links.length, page).toBeGreaterThan(0);
+      for (const link of links) expect((await call(link)).status, `${page} links to ${link}`).toBe(200);
+    }
+  });
+});
+
 describe("room lookups", () => {
   const unknown = "00000000-0000-4000-8000-000000000000";
 
   it("serves the room page for an existing room", async () => {
     const id = await newRoomId();
-    const res = await call(`/chat/r/${id}`);
+    const res = await call(`/r/${id}`);
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("/chat/app.js");
+    expect(await res.text()).toContain("/app.js");
   });
 
   it("404s an unknown room page", async () => {
-    const res = await call(`/chat/r/${unknown}`);
+    const res = await call(`/r/${unknown}`);
     expect(res.status).toBe(404);
     expect(await res.text()).toContain("Room not found");
   });
 
   it("hands out ICE servers only to people who join, not over HTTP", async () => {
     const id = await newRoomId();
-    expect((await call(`/chat/config?room=${id}`)).status).toBe(404);
+    expect((await call(`/config?room=${id}`)).status).toBe(404);
     const a = await join(id, "A");
     const iceServers = a.welcome.iceServers as { urls: string }[];
     expect(iceServers[0]!.urls).toContain("stun:");
@@ -279,7 +298,7 @@ describe("expiry", () => {
   it("deletes an unused room when its alarm fires", async () => {
     const id = await newRoomId();
     expect(await runDurableObjectAlarm(stubFor(id))).toBe(true);
-    expect((await call(`/chat/r/${id}`)).status).toBe(404);
+    expect((await call(`/r/${id}`)).status).toBe(404);
   });
 
   it("keeps a room alive while someone is connected", async () => {
@@ -288,7 +307,7 @@ describe("expiry", () => {
     // While anyone is present the alarm only sweeps; it never expires the room.
     expect(await runDurableObjectAlarm(stubFor(id))).toBe(true);
     expect(await runDurableObjectAlarm(stubFor(id))).toBe(true);
-    expect((await call(`/chat/r/${id}`)).status).toBe(200);
+    expect((await call(`/r/${id}`)).status).toBe(200);
   });
 
   it("keeps the room for its TTL when the last person drops without saying goodbye", async () => {
@@ -297,12 +316,12 @@ describe("expiry", () => {
     a.ws.close(4000, "network lost"); // not a deliberate leave
     await vi.waitFor(async () => ageGrace(id, a.id));
     await runDurableObjectAlarm(stubFor(id)); // the sweep that lets A go
-    expect((await call(`/chat/r/${id}`)).status).toBe(200);
+    expect((await call(`/r/${id}`)).status).toBe(200);
     const alarm = await runInDurableObject(stubFor(id), (_i: Room, state) => state.storage.getAlarm());
     expect(alarm! - Date.now()).toBeGreaterThan(23 * 60 * 60 * 1000);
     // Only the TTL alarm itself deletes it.
     await runDurableObjectAlarm(stubFor(id));
-    expect((await call(`/chat/r/${id}`)).status).toBe(404);
+    expect((await call(`/r/${id}`)).status).toBe(404);
   });
 
   it("doesn't let a stream of events postpone the sweep", async () => {
@@ -324,7 +343,7 @@ describe("expiry", () => {
     a.ws.close(1000, "bye");
     await vi.waitFor(async () => {
       await runDurableObjectAlarm(stubFor(id));
-      expect((await call(`/chat/r/${id}`)).status).toBe(404);
+      expect((await call(`/r/${id}`)).status).toBe(404);
     });
   });
 });
@@ -538,7 +557,7 @@ describe("reconnecting", () => {
 
 describe("client reports", () => {
   const post = (body: unknown, origin = ORIGIN) =>
-    call("/chat/report", { method: "POST", headers: { origin }, body: typeof body === "string" ? body : JSON.stringify(body) });
+    call("/report", { method: "POST", headers: { origin }, body: typeof body === "string" ? body : JSON.stringify(body) });
 
   it("logs whitelisted fields only, clipped", async () => {
     const logged: string[] = [];

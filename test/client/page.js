@@ -1,13 +1,13 @@
 // Runs a page script (app.js, lobby.js) the way a browser would: the real
-// HTML from public/chat in happy-dom, with the browser APIs the page uses
+// HTML from public/ in happy-dom, with the browser APIs the page uses
 // swapped for fakes the test controls.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { vi } from "vitest";
 
-/** Put the body of public/chat/<file> into the document, minus its scripts. */
+/** Put the body of public/<file> into the document, minus its scripts. */
 export function loadHtml(file) {
-  const html = readFileSync(join(import.meta.dirname, "../../public/chat", file), "utf8");
+  const html = readFileSync(join(import.meta.dirname, "../../public", file), "utf8");
   const body = html.match(/<body>([\s\S]*)<\/body>/)[1].replace(/<script[\s\S]*?<\/script>/g, "");
   document.body.innerHTML = body;
 }

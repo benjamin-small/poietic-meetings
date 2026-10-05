@@ -1,13 +1,13 @@
 {
-  // Worker name is fixed by poietic-dot-tech infra/tinkers.tf (project-site
+  // Worker name is fixed by poietic-dot-tech infra/meetings.tf (project-site
   // module: poietic-<subdomain>). OpenTofu owns the Worker's existence, DNS
   // and route; this repo owns what it serves.
-  "name": "poietic-tinkers",
+  "name": "poietic-meetings",
   "main": "src/worker.ts",
   "compatibility_date": "2026-08-01",
   "observability": { "enabled": true },
 
-  // Routing stays in OpenTofu (tinkers.poietic.tech/*); don't let wrangler
+  // Routing stays in OpenTofu (meetings.poietic.tech/*); don't let wrangler
   // create a workers.dev URL or its own routes.
   "workers_dev": false,
 

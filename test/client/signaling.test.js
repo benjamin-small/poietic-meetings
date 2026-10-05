@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeWebSocket } from "./fakes.js";
-import { openSignaling } from "../../public/chat/signaling.js";
+import { openSignaling } from "../../public/signaling.js";
 
 let windowListeners;
 let documentListeners;
@@ -12,7 +12,7 @@ beforeEach(() => {
   windowListeners = {};
   documentListeners = {};
   vi.stubGlobal("WebSocket", FakeWebSocket);
-  vi.stubGlobal("location", { protocol: "https:", host: "tinkers.test" });
+  vi.stubGlobal("location", { protocol: "https:", host: "meetings.test" });
   vi.stubGlobal("navigator", { onLine: true });
   vi.stubGlobal("document", {
     visibilityState: "visible",
@@ -42,6 +42,11 @@ function open(handlers = {}) {
 const latest = () => FakeWebSocket.all.at(-1);
 
 describe("signaling", () => {
+  it("connects to the room's WebSocket on this host", () => {
+    open();
+    expect(latest().url).toBe("wss://meetings.test/ws?room=room-1");
+  });
+
   it("reconnects after a drop and reports the outage once it's back", async () => {
     const { signaling, calls } = open();
     latest().open();

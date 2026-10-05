@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeFetch, fakeLocation, json, loadHtml, settle } from "./page.js";
 
 const AUTH = "https://auth.poietic.tech";
-const ROOM = "https://tinkers.poietic.tech/chat/r/0b5c6a64-56a2-4c43-9d58-8b0d6a3c2f11";
+const ROOM = "https://meetings.poietic.tech/r/0b5c6a64-56a2-4c43-9d58-8b0d6a3c2f11";
 
 let fetch;
 let loc;
@@ -12,7 +12,7 @@ beforeEach(() => {
   vi.resetModules();
   loadHtml("index.html");
   fetch = fakeFetch();
-  loc = fakeLocation("https://tinkers.poietic.tech/chat");
+  loc = fakeLocation("https://meetings.poietic.tech/");
 });
 
 afterEach(() => {
@@ -26,7 +26,7 @@ const shown = (id) => !$(id).hidden;
 /** Load the lobby; resolves once it has checked sign-in. */
 async function openLobby(me = { authenticated: true, user: { shownAs: "Ada" } }) {
   if (me) fetch.respond(me instanceof Response || me instanceof Error ? me : json(me));
-  await import("../../public/chat/lobby.js");
+  await import("../../public/lobby.js");
 }
 
 describe("lobby", () => {
@@ -54,14 +54,14 @@ describe("lobby", () => {
 
   it("points sign-in and sign-out at auth, returning to this page", async () => {
     await openLobby();
-    const back = encodeURIComponent("https://tinkers.poietic.tech/chat");
+    const back = encodeURIComponent("https://meetings.poietic.tech/");
     expect(document.querySelector('[data-provider="google"]').href).toBe(`${AUTH}/login/google?redirect=${back}`);
     expect(document.querySelector('[data-provider="github"]').href).toBe(`${AUTH}/login/github?redirect=${back}`);
     expect($("signout").href).toBe(`${AUTH}/logout?redirect=${back}`);
   });
 
   it("skips the auth check on localhost, where the dev bypass applies", async () => {
-    loc = fakeLocation("http://localhost:8787/chat");
+    loc = fakeLocation("http://localhost:8787/");
     await openLobby(null);
     expect(fetch).not.toHaveBeenCalled();
     expect($("who").textContent).toBe("Local dev");
@@ -73,7 +73,7 @@ describe("lobby", () => {
     $("create").click();
     expect($("create").disabled).toBe(true);
     await settle();
-    expect(fetch).toHaveBeenLastCalledWith("/chat/rooms", { method: "POST" });
+    expect(fetch).toHaveBeenLastCalledWith("/rooms", { method: "POST" });
     expect(loc.href).toBe(ROOM);
   });
 
@@ -82,7 +82,7 @@ describe("lobby", () => {
     fetch.respond(json({}, 401), json({ authenticated: true }), json({ url: ROOM }));
     $("create").click();
     await settle();
-    expect(fetch.mock.calls.slice(1).map(([url]) => url)).toEqual(["/chat/rooms", `${AUTH}/me`, "/chat/rooms"]);
+    expect(fetch.mock.calls.slice(1).map(([url]) => url)).toEqual(["/rooms", `${AUTH}/me`, "/rooms"]);
     expect(loc.href).toBe(ROOM);
   });
 
@@ -92,7 +92,7 @@ describe("lobby", () => {
     $("create").click();
     await settle();
     expect(shown("signed-out")).toBe(true);
-    expect(loc.href).toBe("https://tinkers.poietic.tech/chat");
+    expect(loc.href).toBe("https://meetings.poietic.tech/");
   });
 
   it("doesn't retry forever if the server keeps saying 401", async () => {
@@ -102,9 +102,9 @@ describe("lobby", () => {
     fetch.respond(json({}, 401), me(), json({}, 401), me(), json({ url: ROOM }));
     $("create").click();
     await settle();
-    expect(fetch.to("/chat/rooms")).toHaveLength(2);
+    expect(fetch.to("/rooms")).toHaveLength(2);
     expect(shown("signed-out")).toBe(true);
-    expect(loc.href).toBe("https://tinkers.poietic.tech/chat");
+    expect(loc.href).toBe("https://meetings.poietic.tech/");
   });
 
   it("shows the error and lets you try again when creating fails", async () => {

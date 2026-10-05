@@ -24,7 +24,7 @@ const FAREWELL_TIMEOUT_MS = 2000;
  */
 export function openSignaling(roomId, { onOpen, onMessage, onDrop, onGiveUp }) {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const url = `${proto}://${location.host}/chat/ws?room=${roomId}`;
+  const url = `${proto}://${location.host}/ws?room=${roomId}`;
   let ws;
   let lastPong = 0;
   let attempts = 0;
