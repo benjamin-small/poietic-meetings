@@ -42,7 +42,7 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
 
-      # The Worker must already exist (poietic-dot-tech infra/tinkers.tf).
+      # The Worker must already exist (poietic-dot-tech infra/meetings.tf).
       # Deploying first would let OpenTofu's create overwrite it with its
       # placeholder.
       - run: npx wrangler deploy

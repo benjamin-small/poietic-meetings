@@ -1,4 +1,4 @@
-/* Shared by the hub (/) and the chat lobby pages. The room page has its own. */
+/* Shared by the lobby (/) and the room-not-found page. The room page has its own (style.css). */
 :root {
   --bg: #0f1115;
   --panel: #181b22;

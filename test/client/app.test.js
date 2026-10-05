@@ -7,7 +7,7 @@ import { fakeFetch, fakeLocalStorage, fakeLocation, mediaStream, loadHtml, settl
 // their own tests.
 const fake = vi.hoisted(() => ({ signaling: null, call: null }));
 
-vi.mock("/chat/signaling.js", () => ({
+vi.mock("/signaling.js", () => ({
   openSignaling: (roomId, handlers) => {
     fake.signaling = {
       roomId,
@@ -26,7 +26,7 @@ vi.mock("/chat/signaling.js", () => ({
   },
 }));
 
-vi.mock("/chat/mesh.js", () => ({
+vi.mock("/mesh.js", () => ({
   MeshCall: class extends EventTarget {
     constructor(opts) {
       super();
@@ -62,7 +62,7 @@ vi.mock("/chat/mesh.js", () => ({
 }));
 
 const ROOM_ID = "0b5c6a64-56a2-4c43-9d58-8b0d6a3c2f11";
-const ROOM_URL = `https://tinkers.poietic.tech/chat/r/${ROOM_ID}`;
+const ROOM_URL = `https://meetings.poietic.tech/r/${ROOM_ID}`;
 
 let fetch;
 let loc;
@@ -93,11 +93,11 @@ const $ = (id) => document.getElementById(id);
 const status = () => $("status").textContent;
 const tileFor = (id) => document.querySelector(`.tile[data-id="${id}"]`);
 const messages = () => [...$("messages").children].map((li) => li.textContent);
-const reports = () => fetch.to("/chat/report").map((r) => r.body);
+const reports = () => fetch.to("/report").map((r) => r.body);
 
 /** Open the room page and, unless told not to, join as `name`. */
 async function openRoom({ name = "Ada", join = true } = {}) {
-  await import("../../public/chat/app.js");
+  await import("../../public/app.js");
   if (!join) return;
   $("name-input").value = name;
   $("join-form").requestSubmit();
@@ -114,9 +114,9 @@ async function inRoom(peers = [], opts) {
 
 describe("joining", () => {
   it("sends you back to the lobby from a malformed room URL", async () => {
-    fakeLocation("https://tinkers.poietic.tech/chat/r/not-a-room");
+    fakeLocation("https://meetings.poietic.tech/r/not-a-room");
     await openRoom({ join: false });
-    expect(location.replace).toHaveBeenCalledWith("/chat");
+    expect(location.replace).toHaveBeenCalledWith("/");
   });
 
   it("asks for a name first, suggesting a guest name", async () => {
@@ -129,7 +129,7 @@ describe("joining", () => {
 
   it("remembers the name for next time", async () => {
     await openRoom({ name: "  Ada Lovelace  " });
-    expect(localStorage.getItem("tinker-chat-name")).toBe("Ada Lovelace");
+    expect(localStorage.getItem("meetings-name")).toBe("Ada Lovelace");
 
     vi.resetModules();
     loadHtml("room.html");
@@ -359,7 +359,7 @@ describe("controls", () => {
     expect(tracks.every((t) => t.stop.mock.calls.length === 1)).toBe(true);
     expect(fake.call.leave).toHaveBeenCalled();
     expect(fake.signaling.close).toHaveBeenCalledWith({ id: "me", token: "tok" });
-    expect(loc.href).toBe("/chat");
+    expect(loc.href).toBe("/");
   });
 });
 

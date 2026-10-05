@@ -1,5 +1,5 @@
 {
-  "name": "web-rtc-tinker",
+  "name": "poietic-meetings",
   "version": "1.0.0",
   "scripts": {
     "test": "npm run check:client && vitest run && vitest run --config vitest.client.config.ts",
@@ -7,7 +7,7 @@
     "typecheck": "tsc",
     "deploy": "wrangler deploy",
     "types": "wrangler types --include-runtime=false",
-    "check:client": "for f in public/chat/*.js; do node --check \"$f\" || exit 1; done",
+    "check:client": "for f in public/*.js; do node --check \"$f\" || exit 1; done",
     "coverage": "vitest run --coverage && vitest run --config vitest.client.config.ts --coverage"
   },
   "devDependencies": {
@@ -21,7 +21,7 @@
   },
   "type": "module",
   "private": true,
-  "description": "Tinker Chat: 1:1 WebRTC video chat at tinkers.poietic.tech/chat",
+  "description": "Meetings: group WebRTC video chat (up to 6) at meetings.poietic.tech",
   "engines": {
     "node": ">=24"
   },

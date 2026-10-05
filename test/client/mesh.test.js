@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakePeerConnection, stream } from "./fakes.js";
-import { MeshCall } from "../../public/chat/mesh.js";
+import { MeshCall } from "../../public/mesh.js";
 
 beforeEach(() => {
   vi.useFakeTimers();

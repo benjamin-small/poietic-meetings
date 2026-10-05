@@ -1,8 +1,8 @@
-import { openSignaling } from "/chat/signaling.js";
-import { MeshCall } from "/chat/mesh.js";
+import { openSignaling } from "/signaling.js";
+import { MeshCall } from "/mesh.js";
 
 const MAX_PEOPLE = 6; // matches MAX_PEERS in src/room.ts
-const NAME_KEY = "tinker-chat-name";
+const NAME_KEY = "meetings-name";
 const MAX_MESSAGES = 200; // older chat lines are dropped, so a flood can't grow the page forever
 
 const $ = (id) => document.getElementById(id);
@@ -14,7 +14,7 @@ const chatInput = $("chat-input");
 const chatButton = chatForm.querySelector("button");
 
 const roomId = location.pathname.split("/").pop();
-if (!/^[0-9a-f-]{36}$/.test(roomId)) location.replace("/chat");
+if (!/^[0-9a-f-]{36}$/.test(roomId)) location.replace("/");
 // Add ?relay=1 to force all media through TURN (for testing TURN setup).
 const forceRelay = new URLSearchParams(location.search).has("relay");
 
@@ -33,7 +33,7 @@ let lastDrop = null; // details of the latest drop, resent on reconnect in case 
 /** Tell the server something went wrong, for Workers Logs. Best effort. */
 function report(event, fields = {}) {
   const body = JSON.stringify({ event, room: roomId, peer: me?.id, peers: names.size, ...fields });
-  fetch("/chat/report", { method: "POST", body, keepalive: true }).catch(() => {});
+  fetch("/report", { method: "POST", body, keepalive: true }).catch(() => {});
 }
 
 const setStatus = (text) => (statusEl.textContent = text);
@@ -334,7 +334,7 @@ $("leave").onclick = async () => {
   call?.leave();
   stopTracks();
   await signaling?.close(me ?? undefined); // says goodbye even mid-reconnect
-  location.href = "/chat";
+  location.href = "/";
 };
 
 chatForm.onsubmit = (e) => {
